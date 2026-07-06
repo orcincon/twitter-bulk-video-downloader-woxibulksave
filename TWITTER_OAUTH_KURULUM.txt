@@ -1,0 +1,40 @@
+=== Twitter/X OAuth - "Uygulamaya erişim verilemedi" Çözümü ===
+
+Bu hata genellikle X Developer Portal ayarlarından kaynaklanır.
+
+0. OAUTH EKRANINDA GÖRÜNEN UYGULAMA ADI ("Woxsify Save" vb.)
+   Giriş ekranındaki "… X hesabına erişmek istiyor" metnindeki isim KODDAN gelmez;
+   X Developer Portal'daki uygulama adıdır. Değiştirmek için:
+   - https://developer.x.com → Projects & Apps → uygulamanız
+   - Settings → App details → "App name" (veya "Display name")
+   - Önerilen: WBS.com veya WBS
+   - Kaydedin; 1–2 dakika sonra yeni girişte yeni isim görünür.
+   (Client ID / Secret aynı kalır; sadece görünen ad değişir.)
+
+1. CALBACK URL (ÖNEMLİ)
+   - developer.x.com → projeniz → User authentication settings
+   - "Callback URI / Redirect URL" bölümüne ŞU ADRESLERİ EKLEYIN:
+   
+   Local (development):
+   http://localhost:3000/api/auth/callback/twitter
+   
+   Production:
+   https://www.woxibulksave.com/api/auth/callback/twitter
+
+2. WEBSITE URL
+   - "Website URL" alanı:
+   Local için: http://localhost:3000
+   Production için: https://www.woxibulksave.com
+
+3. APP PERMISSIONS
+   - Uygulama "Development" modundaysa sadece eklediğiniz test kullanıcıları giriş yapabilir
+   - Production'a geçmek için "App permissions" → "Set up" tamamlanmalı
+   - Gerekli izinler: Read (veya Read and Write)
+
+4. .env.local (LOCAL GELİŞTİRME)
+   NEXTAUTH_URL=http://localhost:3000
+   (NEXTAUTH_URL callback URL'in temelini oluşturur)
+
+5. DEĞİŞİKLİK SONRASI
+   - Ayarları kaydettikten sonra 1-2 dakika bekleyin
+   - Tarayıcıda çerezleri temizleyip tekrar deneyin

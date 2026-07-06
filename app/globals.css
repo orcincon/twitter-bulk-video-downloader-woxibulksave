@@ -1,15 +1,17 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
+  --background: #f4f9ff;
   --foreground: #171717;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-twitter: #1d9bf0;
+  --color-twitter-dark: #1686d4;
+  --color-twitter-light: #E7F3FF;
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -19,8 +21,52 @@
   }
 }
 
+/* Mobile-first base */
+html {
+  -webkit-text-size-adjust: 100%;
+  scroll-behavior: smooth;
+}
+
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-inter), 'Inter', ui-sans-serif, system-ui, sans-serif;
+  min-height: 100dvh;
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+  padding-bottom: env(safe-area-inset-bottom);
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Touch-friendly: min tap target 44x44px */
+button, a[href], input, select, textarea, [role="button"] {
+  touch-action: manipulation;
+}
+
+/* WBS standard - strict adherence */
+.wbs-gradient {
+  background: linear-gradient(135deg, #1d9bf0 0%, #1686d4 100%);
+}
+.x-button {
+  background-color: #000000;
+  color: #ffffff;
+}
+.glass-input {
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(8px);
+}
+.touch-target {
+  min-height: 48px;
+}
+.step-number {
+  background: #1d9bf0;
+  color: white;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+  font-size: 14px;
 }

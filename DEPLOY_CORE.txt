@@ -1,0 +1,26 @@
+# woxibulksave.com deploy
+
+1. Terminalde proje klasörüne git:
+   cd d:\woxibulksave
+
+2. Varsa eski linki kaldır:
+   rmdir /s /q .vercel
+
+3. .env.local ayarla (env.example'dan kopyala):
+   NEXTAUTH_URL=https://woxibulksave.com
+   (Diğer env değişkenlerini doldur)
+
+4. Vercel'de domain ekle:
+   - Project Settings → Domains → Add: woxibulksave.com
+   - İsteğe bağlı: www.woxibulksave.com
+
+5. Yeni proje bağla (interaktif):
+   vercel link
+
+   Sorulduğunda:
+   - Scope: WBS / WoxiBulkSave (veya kullandığın hesap)
+   - Link to existing project? → No
+   - Project name? → woxibulksave (veya tercih)
+
+6. Deploy et:
+   vercel --prod
