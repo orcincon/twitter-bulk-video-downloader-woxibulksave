@@ -254,7 +254,6 @@ export default function BulkDownloadSection({
   const placeholder = ui.placeholder || 'Paste Twitter/X video URLs here...';
   const removeLabel = ui.remove || 'Remove';
   const downloadTemplate = ui.downloadCount || 'Download {n} Videos Now';
-  const analyzeButtonLabel = ui.analyzeButton || 'ANALYZE VIDEOS';
   const processingLabel = ui.processing || 'Processing...';
   const videoNotFoundLabel = ui.videoNotFound || 'Video Not Found';
   const videoNotFoundFriendly = ui.videoNotFoundFriendly || 'No video found. Please check if this tweet contains a video — text-only tweets cannot be downloaded.';
@@ -397,11 +396,6 @@ export default function BulkDownloadSection({
 
   const handleDownloadRef = useRef(handleDownload);
   handleDownloadRef.current = handleDownload;
-
-  const requestAnalyze = useCallback((showSignInToast = true) => {
-    setAnalyzeRequested(true);
-    handleDownloadRef.current({ showSignInToast, retryErrors: true });
-  }, []);
 
   useEffect(() => {
     if (links.length === 0 || typeof window === 'undefined') return;
@@ -713,7 +707,6 @@ export default function BulkDownloadSection({
 
   const isWbs = variant === 'wbs';
   const wbsPlaceholder = lang === 'tr' ? 'X/Twitter linklerini buraya tek tek veya toplu halde yapıştırın...' : lang === 'de' ? 'X/Twitter-Links hier einzeln oder gebündelt einfügen...' : lang === 'es' ? 'Pegue los enlaces de X/Twitter aquí uno por uno o en masa...' : 'Paste X/Twitter links here, one per line or in bulk...';
-  const wbsAnalyzeLabel = lang === 'tr' ? 'Analiz Et' : lang === 'de' ? 'Analysieren' : lang === 'es' ? 'Analizar' : 'Analyze';
   const wbsHint = lang === 'tr' ? 'Link yapıştırıldığı an otomatik analiz başlar' : lang === 'de' ? 'Die Analyse startet automatisch beim Einfügen des Links' : lang === 'es' ? 'El análisis comienza automáticamente al pegar el enlace' : 'Analysis starts automatically when you paste a link';
 
   return (
@@ -728,18 +721,6 @@ export default function BulkDownloadSection({
             className="w-full p-3 bg-transparent text-slate-800 placeholder:text-slate-400 focus:outline-none text-sm border-none resize-none mb-2"
             aria-label="X/Twitter video linkleri"
           />
-          <div className="flex flex-col gap-2 pt-2">
-            <button
-              type="button"
-              onClick={() => links.length > 0 && requestAnalyze(true)}
-              disabled={isProcessing || links.length === 0}
-              className="bg-green-600 hover:bg-green-700 w-full touch-target rounded-xl font-bold text-sm shadow-lg shadow-green-200 active:scale-95 transition flex items-center justify-center gap-2 text-white disabled:pointer-events-none"
-              aria-label={wbsAnalyzeLabel}
-            >
-              <i className="fa-solid fa-bolt" aria-hidden />
-              {wbsAnalyzeLabel}
-            </button>
-          </div>
           <p className="text-[10px] text-slate-400 font-medium mt-3 uppercase tracking-wide">
             <i className="fa-solid fa-circle-check text-blue-500 mr-1" aria-hidden />
             {wbsHint}

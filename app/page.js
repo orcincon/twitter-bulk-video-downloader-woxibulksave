@@ -95,8 +95,8 @@ export default async function Home({ searchParams }) {
         <header className="wbs-gradient text-white pt-10 pb-24 px-4 overflow-x-hidden">
           <div className="max-w-2xl mx-auto text-center">
             <h1 className="mx-auto w-max max-w-full text-[clamp(11px,3.4vw,20px)] sm:text-[18px] md:text-[20px] font-black mb-8 leading-snug tracking-tight">
-              <span className="block whitespace-nowrap">{h.heroTitle1 || 'WBS ile X (Twitter) gönderi videolarını'}</span>
-              <span className="block whitespace-nowrap">{h.heroTitle2 || 'ister tek tek veya toplu analiz edin'}</span>
+              <span className="block whitespace-nowrap">{h.heroTitle1 || 'X (Twitter) videolarını ve GIF\'leri indirin'}</span>
+              <span className="block whitespace-nowrap">{h.heroTitle2 || 'tek tek veya toplu — WoxiBulkSave.com ile'}</span>
             </h1>
             <div className="max-w-2xl mx-auto">
               <BulkDownloadSection
