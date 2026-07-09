@@ -1,12 +1,8 @@
 import { NextResponse } from 'next/server';
-import { createHash } from 'crypto';
+import { makeKamikazeToken } from '@/lib/kamikaze-session.js';
 
 const COOKIE_NAME = 'kamikaze';
 const COOKIE_OPTIONS = { path: '/', httpOnly: true, sameSite: 'lax', maxAge: 60 * 60 * 24 * 7 }; // 7 days — path / so API receives cookie
-
-function makeToken(email, secret) {
-  return createHash('sha256').update(`${email || ''}:${secret}`).digest('hex');
-}
 
 export async function POST(request) {
   const allowedEmail = (process.env.KAMIKAZE_EMAIL || '').trim().toLowerCase();
@@ -30,7 +26,7 @@ export async function POST(request) {
       }
     }
 
-    const token = makeToken(allowedEmail, allowedSecret);
+    const token = await makeKamikazeToken(allowedEmail, allowedSecret);
     const res = NextResponse.json({ ok: true });
     res.cookies.set(COOKIE_NAME, token, {
       ...COOKIE_OPTIONS,

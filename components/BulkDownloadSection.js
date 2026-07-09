@@ -10,28 +10,63 @@ import {
   recordGuestDownloads,
 } from '@/lib/guest-limit.js';
 
+import {
+  buildResultsByStatusId,
+  dedupeLinksByStatusId,
+  getLinksNeedingAnalysis,
+  getTweetStatusId,
+  mergeAnalysisResults,
+  pruneResultsForLinks,
+} from '@/lib/tweet-thumbnails.js';
+
 const SignInToast = dynamic(() => import('./SignInToast.js'), { ssr: false });
+const getStatusId = getTweetStatusId;
 
-const STATUS_ID_REGEX = /\/status\/(\d+)/i;
-function getStatusId(u) {
-  const m = String(u || '').match(STATUS_ID_REGEX);
-  return m ? m[1] : null;
+const BULK_THUMB_FETCH_GAP_MS = 200;
+
+function isValidThumbUrl(value) {
+  return typeof value === 'string' && value.startsWith('http');
 }
 
-function getPreviewThumbnail(url, linkToResult, thumbByStatusId) {
-  const id = getStatusId(url);
-  if (!id) return null;
-  const r = linkToResult.get(id);
-  if (r?.thumbnail && typeof r.thumbnail === 'string' && r.thumbnail.startsWith('http')) {
-    return r.thumbnail;
+function mergeBulkThumbnailMaps(prev, patch) {
+  if (!patch || typeof patch !== 'object') return prev;
+  let changed = false;
+  const next = { ...prev };
+  for (const [statusId, thumbnail] of Object.entries(patch)) {
+    if (!statusId || !isValidThumbUrl(thumbnail)) continue;
+    if (next[statusId] !== thumbnail) {
+      next[statusId] = thumbnail;
+      changed = true;
+    }
   }
-  return thumbByStatusId[id] ?? null;
+  return changed ? next : prev;
 }
 
-function setThumbForStatusId(prev, statusId, thumbnail) {
-  if (!thumbnail || !statusId) return prev;
-  if (prev[statusId] === thumbnail) return prev;
-  return { ...prev, [statusId]: thumbnail };
+function getBulkLinkThumbnail(url, thumbnailMap) {
+  const statusId = getTweetStatusId(url);
+  if (!statusId) return null;
+  const cached = thumbnailMap?.[statusId];
+  return isValidThumbUrl(cached) ? cached : null;
+}
+
+async function fetchBulkThumbnailForLink(url, statusId) {
+  if (!url || !statusId) return null;
+  try {
+    const params = new URLSearchParams({
+      url: String(url),
+      id: String(statusId),
+    });
+    const res = await fetch(`/api/thumbnail?${params}`, {
+      credentials: 'include',
+      cache: 'no-store',
+    });
+    if (!res.ok) return null;
+    const data = await res.json().catch(() => null);
+    if (!data || String(data.id) !== String(statusId)) return null;
+    return isValidThumbUrl(data.thumbnail) ? data.thumbnail : null;
+  } catch {
+    return null;
+  }
 }
 
 const TWITTER_URL_PATTERN = /https?:\/\/(?:www\.|mobile\.)?(?:x\.com|twitter\.com)\/(?:(?!https?:\/\/)[^\s])*/gi;
@@ -59,7 +94,7 @@ function extractTwitterUrls(text) {
   const cleaned = matches
     .map((u) => cleanExtractedUrl(u))
     .filter(isValidTwitterUrl);
-  return [...new Set(cleaned)];
+  return dedupeLinksByStatusId([...new Set(cleaned)]);
 }
 
 const themeResultStyles = {
@@ -108,21 +143,31 @@ export default function BulkDownloadSection({
   const common = layout?.common || {};
   const [rawText, setRawText] = useState('');
   const [links, setLinks] = useState([]);
-  const [thumbByStatusId, setThumbByStatusId] = useState({});
+  const [bulkThumbnails, setBulkThumbnails] = useState({});
   const [isProcessing, setIsProcessing] = useState(false);
   const [results, setResults] = useState([]);
   const [error, setError] = useState(null);
   const [isBulkDownloading, setIsBulkDownloading] = useState(false);
   const [saveHistoryMessage, setSaveHistoryMessage] = useState(null);
   const [signInToast, setSignInToast] = useState(null); // null | 'limit' | 'multi'
+  const [analyzeRequested, setAnalyzeRequested] = useState(false);
   const [showPasteLinksModal, setShowPasteLinksModal] = useState(false);
-  const [pasteLinksModalReason, setPasteLinksModalReason] = useState('no_links'); // 'no_links' | 'no_media'
+  const [pasteLinksModalReason, setPasteLinksModalReason] = useState('no_links'); // 'no_links' | 'no_media' | 'analyzing'
   const [pendingDownload, setPendingDownload] = useState(null); // null | { type: 'quality', mode } | { type: 'zip' }
   const requestInProgress = useRef(false);
+  const prevLinksKeyRef = useRef('');
+  const bulkThumbnailsRef = useRef({});
+  bulkThumbnailsRef.current = bulkThumbnails;
 
   const pasteLinksModalTextDefault = lang === 'tr' ? 'Lütfen önce Twitter/X gönderi linklerini yapıştırın.' : lang === 'de' ? 'Bitte fügen Sie zuerst Twitter/X-Beitragslinks ein.' : lang === 'es' ? 'Por favor, pegue primero los enlaces de publicaciones de Twitter/X.' : 'Please paste Twitter/X post links first.';
   const noDownloadableMediaModalTextDefault = lang === 'tr' ? 'Bu gönderilerde analiz edilebilir medya bulunamadı. Analiz henüz tamamlanmamış olabilir veya gönderilerde video/görsel yoktur.' : lang === 'de' ? 'In diesen Beiträgen wurde kein analysierbares Medium gefunden. Die Analyse läuft möglicherweise noch oder die Beiträge enthalten keine Videos/Bilder.' : lang === 'es' ? 'No se encontró contenido analizable en estas publicaciones. El análisis puede seguir en curso o las publicaciones no contienen vídeo/imagen.' : 'No analyzable media found in these posts. Analysis may still be in progress or the posts may not contain video/images.';
-  const pasteLinksModalText = pasteLinksModalReason === 'no_media' ? (common.noDownloadableMediaModalText || noDownloadableMediaModalTextDefault) : (common.pasteLinksModalText || pasteLinksModalTextDefault);
+  const analyzingModalTextDefault = lang === 'tr' ? 'Analiz devam ediyor. Lütfen birkaç saniye bekleyip tekrar deneyin.' : lang === 'de' ? 'Die Analyse läuft noch. Bitte warten Sie einige Sekunden und versuchen Sie es erneut.' : lang === 'es' ? 'El análisis sigue en curso. Espere unos segundos e inténtelo de nuevo.' : 'Analysis is still in progress. Please wait a few seconds and try again.';
+  const pasteLinksModalText =
+    pasteLinksModalReason === 'analyzing'
+      ? (common.analyzingModalText || analyzingModalTextDefault)
+      : pasteLinksModalReason === 'no_media'
+        ? (common.noDownloadableMediaModalText || noDownloadableMediaModalTextDefault)
+        : (common.pasteLinksModalText || pasteLinksModalTextDefault);
 
   useEffect(() => {
     if (isLoggedIn && typeof window !== 'undefined') {
@@ -132,46 +177,52 @@ export default function BulkDownloadSection({
 
   useEffect(() => {
     if (!links.length || typeof window === 'undefined') return;
+
     let cancelled = false;
-    const fetchAll = async () => {
-      const seenIds = new Set();
+
+    (async () => {
       for (let i = 0; i < links.length; i++) {
         if (cancelled) return;
+
         const url = links[i];
-        const statusId = getStatusId(url);
-        if (!statusId || seenIds.has(statusId)) continue;
-        seenIds.add(statusId);
-        const fromResult = results.find((r) => getStatusId(r?.tweetUrl) === statusId);
-        if (fromResult?.thumbnail) {
-          setThumbByStatusId((prev) => setThumbForStatusId(prev, statusId, fromResult.thumbnail));
-          continue;
+        const statusId = getTweetStatusId(url);
+        if (!statusId) continue;
+
+        if (isValidThumbUrl(bulkThumbnailsRef.current[statusId])) continue;
+
+        const thumbnail = await fetchBulkThumbnailForLink(url, statusId);
+        if (cancelled) return;
+        if (thumbnail) {
+          setBulkThumbnails((prev) => mergeBulkThumbnailMaps(prev, { [statusId]: thumbnail }));
         }
-        try {
-          const res = await fetch(
-            `/api/thumbnail?url=${encodeURIComponent(url)}&id=${encodeURIComponent(statusId)}`,
-            { credentials: 'include', cache: 'no-store' }
-          );
-          const data = await res.json();
-          if (cancelled) return;
-          if (data?.thumbnail && typeof data.thumbnail === 'string') {
-            setThumbByStatusId((prev) => setThumbForStatusId(prev, statusId, data.thumbnail));
-          }
-        } catch (_) {}
-        if (i < links.length - 1) await new Promise((r) => setTimeout(r, 150));
+
+        if (i < links.length - 1) {
+          await new Promise((resolve) => setTimeout(resolve, BULK_THUMB_FETCH_GAP_MS));
+        }
       }
+    })();
+
+    return () => {
+      cancelled = true;
     };
-    fetchAll();
-    return () => { cancelled = true; };
-  }, [links.join('|'), results]);
+  }, [links.join('|')]);
 
   useEffect(() => {
-    const ids = new Set(links.map(getStatusId).filter(Boolean));
-    setThumbByStatusId((prev) => {
+    const activeIds = new Set(links.map(getTweetStatusId).filter(Boolean));
+    setBulkThumbnails((prev) => {
       const next = {};
-      for (const [id, thumb] of Object.entries(prev)) {
-        if (ids.has(id)) next[id] = thumb;
+      for (const [statusId, thumbnail] of Object.entries(prev)) {
+        if (activeIds.has(statusId)) next[statusId] = thumbnail;
       }
-      return Object.keys(next).length === Object.keys(prev).length ? prev : next;
+      if (Object.keys(next).length === Object.keys(prev).length) return prev;
+      return next;
+    });
+  }, [links.join('|')]);
+
+  useEffect(() => {
+    setResults((prev) => {
+      const pruned = pruneResultsForLinks(prev, links);
+      return pruned.length === prev.length ? prev : pruned;
     });
   }, [links.join('|')]);
 
@@ -187,8 +238,11 @@ export default function BulkDownloadSection({
         if (log && Array.isArray(log.urls) && log.urls.length > 0) {
           const text = log.urls.join('\n');
           setRawText(text);
-          setLinks(log.urls);
+          setLinks(dedupeLinksByStatusId(log.urls));
           setError(null);
+          if (Array.isArray(log.results_json) && log.results_json.length > 0) {
+            setResults(log.results_json);
+          }
         }
       } catch (_) {
         if (!cancelled) setError(ui.loadLogFailed || 'Geçmiş yüklenemedi.');
@@ -205,13 +259,38 @@ export default function BulkDownloadSection({
   const videoNotFoundLabel = ui.videoNotFound || 'Video Not Found';
   const videoNotFoundFriendly = ui.videoNotFoundFriendly || 'No video found. Please check if this tweet contains a video — text-only tweets cannot be downloaded.';
   const rateLimitMessage = ui.rateLimitMessage || 'System is briefly busy. Please try again in 2 seconds.';
-  const downloadVideoLabel = ui.downloadVideo || 'Download HD Video';
+  const downloadVideoLabel = ui.downloadVideo || 'HD';
   const linkExpiredLabel = ui.linkExpired || 'Download link expired, please retry';
   const downloadAllLabel = ui.downloadAll || 'Download All Videos';
   const downloadingLabel = ui.downloading || 'Downloading...';
   const clearAndNewLabel = ui.clearAndNew || 'Clear & Search New';
-  const zipOptionLabel = ui.zipOption || 'ZIP';
+  const zipOptionLabel = ui.zipOption || 'Bulk (ZIP)';
   const browserPermissionHint = ui.browserPermissionHint || (lang === 'tr' ? 'Sıralı analizde tarayıcı izni gerekebilir.' : lang === 'de' ? 'Bei sequenzieller Analyse kann eine Browsererlaubnis erforderlich sein.' : lang === 'es' ? 'El análisis secuencial puede requerir permiso del navegador.' : 'Sequential analysis may require browser permission.');
+
+  const bulkSignInRequiredLabel =
+    common.guestBulkInlineMessage ||
+    (lang === 'tr'
+      ? 'Toplu analiz yapabilmeniz için X girişi yapmanız gerekiyor.'
+      : lang === 'de'
+        ? 'X-Anmeldung erforderlich'
+        : lang === 'es'
+          ? 'Se requiere inicio de sesión con X'
+          : 'X sign-in required');
+  const isBulkGuest = !isLoggedIn && links.length > 1;
+
+  const getLinkErrorLabel = useCallback(
+    (result) => {
+      if (isBulkGuest && analyzeRequested) return bulkSignInRequiredLabel;
+      if (!result) {
+        if (isProcessing) return processingLabel;
+        if (!analyzeRequested) return null;
+        return videoNotFoundLabel;
+      }
+      if (result.status === 'error') return result.error || videoNotFoundLabel;
+      return null;
+    },
+    [isBulkGuest, analyzeRequested, bulkSignInRequiredLabel, isProcessing, processingLabel, videoNotFoundLabel, isLoggedIn]
+  );
 
   const promptGuestSignIn = useCallback((variant) => {
     setSignInToast(variant);
@@ -219,23 +298,22 @@ export default function BulkDownloadSection({
     requestInProgress.current = false;
   }, []);
 
-  const handleDownload = useCallback(async () => {
+  const handleDownload = useCallback(async ({ showSignInToast = false, retryErrors = false } = {}) => {
     if (links.length === 0 || isProcessing || requestInProgress.current) return;
     if (!isLoggedIn && typeof window !== 'undefined') {
       if (links.length > 1) {
-        promptGuestSignIn('multi');
-        return;
-      }
-      if (isGuestLimitReached()) {
-        promptGuestSignIn('limit');
+        setError(bulkSignInRequiredLabel);
+        if (showSignInToast) promptGuestSignIn('multi');
         return;
       }
     }
-    const linksToAnalyze = links;
+
+    const linksToAnalyze = getLinksNeedingAnalysis(links, results, { retryErrors });
+    if (linksToAnalyze.length === 0) return;
+
     requestInProgress.current = true;
     setIsProcessing(true);
     setError(null);
-    setResults([]);
 
     await new Promise((r) => setTimeout(r, 200));
 
@@ -262,33 +340,26 @@ export default function BulkDownloadSection({
         const hasRateLimit = data.results.some((r) => r.error === 'RATE_LIMIT');
         const failedResults = data.results.filter((r) => r.status === 'error');
         const hasSuccess = data.results.some((r) => r.status === 'success' && r.videos?.length > 0);
-        const mergedResults = data.results;
+        const mergedResults = mergeAnalysisResults(results, data.results, links);
         if (hasRateLimit) {
           setError(rateLimitMessage);
         } else if (!hasSuccess && failedResults.length > 0) {
-          setError(failedResults[0]?.error || videoNotFoundFriendly);
+          const allFailed = getLinksNeedingAnalysis(links, mergedResults, { retryErrors: false }).length === links.length;
+          if (allFailed) {
+            setError(
+              !isLoggedIn && links.length > 1
+                ? bulkSignInRequiredLabel
+                : failedResults[0]?.error || videoNotFoundFriendly
+            );
+          }
         }
         setResults(mergedResults);
-        setThumbByStatusId((prev) => {
-          let next = prev;
-          for (const r of mergedResults) {
-            const statusId = getStatusId(r?.tweetUrl);
-            if (statusId && r?.thumbnail) {
-              next = setThumbForStatusId(next, statusId, r.thumbnail);
-            }
-          }
-          return next;
-        });
-        if (hasSuccess && !isLoggedIn && typeof window !== 'undefined') {
-          const successCount = data.results.filter((r) => r.status === 'success' && r.videos?.length > 0).length;
-          recordGuestDownloads(successCount);
-        }
-        if (hasSuccess && isLoggedIn) {
-          setSaveHistoryMessage(null);
+        if (hasSuccess) {
+          if (isLoggedIn) setSaveHistoryMessage(null);
           try {
             const payload = {
               urls: links,
-              results: data.results,
+              results: mergedResults,
               language: (lang || 'en').toUpperCase().slice(0, 2),
             };
             const saveRes = await fetch('/api/analysis-history', {
@@ -299,12 +370,12 @@ export default function BulkDownloadSection({
             });
             const errData = await saveRes.json().catch(() => ({}));
             if (saveRes.ok) {
-              setSaveHistoryMessage(common.saveHistorySuccess || ui.saveHistorySuccess || 'Arşive eklendi.');
-            } else if (saveRes.status === 401) {
-              setSaveHistoryMessage(common.saveHistoryLoginHint || ui.saveHistoryLoginHint || 'Arşive eklemek için X kullanıcı girişi yapın.');
+              if (isLoggedIn) {
+                setSaveHistoryMessage(common.saveHistorySuccess || ui.saveHistorySuccess || 'Arşive eklendi.');
+              }
             } else if (saveRes.status === 503) {
-              setSaveHistoryMessage('Supabase yapılandırılmamış.');
-            } else {
+              if (isLoggedIn) setSaveHistoryMessage('Supabase yapılandırılmamış.');
+            } else if (isLoggedIn) {
               const apiMsg = errData?.error || errData?.code || saveRes.statusText || `HTTP ${saveRes.status}`;
               console.error('API hatası:', apiMsg);
               setSaveHistoryMessage(null);
@@ -312,7 +383,7 @@ export default function BulkDownloadSection({
           } catch (err) {
             const msg = err?.message ?? String(err);
             console.error('API hatası:', msg);
-            setSaveHistoryMessage(null);
+            if (isLoggedIn) setSaveHistoryMessage(null);
           }
         }
       }
@@ -322,18 +393,38 @@ export default function BulkDownloadSection({
       setIsProcessing(false);
       requestInProgress.current = false;
     }
-  }, [links, isProcessing, rateLimitMessage, videoNotFoundFriendly, isLoggedIn, promptGuestSignIn]);
+  }, [links, results, isProcessing, rateLimitMessage, videoNotFoundFriendly, isLoggedIn, promptGuestSignIn, bulkSignInRequiredLabel, lang, common, ui]);
 
   const handleDownloadRef = useRef(handleDownload);
   handleDownloadRef.current = handleDownload;
 
+  const requestAnalyze = useCallback((showSignInToast = true) => {
+    setAnalyzeRequested(true);
+    handleDownloadRef.current({ showSignInToast, retryErrors: true });
+  }, []);
+
   useEffect(() => {
     if (links.length === 0 || typeof window === 'undefined') return;
+    if (!isLoggedIn) {
+      if (links.length > 1) return;
+    }
+
+    const currentKey = links.join('|');
+    const prevKey = prevLinksKeyRef.current;
+    prevLinksKeyRef.current = currentKey;
+
+    if (prevKey && currentKey !== prevKey) {
+      const prevIds = new Set(prevKey.split('|').filter(Boolean));
+      const currIds = new Set(currentKey.split('|').filter(Boolean));
+      const onlyRemoved = currIds.size < prevIds.size && [...currIds].every((id) => prevIds.has(id));
+      if (onlyRemoved) return;
+    }
+
     const id = setTimeout(() => {
-      handleDownloadRef.current();
+      handleDownloadRef.current({ showSignInToast: false });
     }, 800);
     return () => clearTimeout(id);
-  }, [links.join('|')]);
+  }, [links.join('|'), isLoggedIn]);
 
   const handleDownloadByQualityRef = useRef(null);
   const handleDownloadAsZipRef = useRef(null);
@@ -360,36 +451,89 @@ export default function BulkDownloadSection({
 
   const matchesQuality = (v, mode) => mode === 'best' || getQualityBand(v) === mode;
 
+  const collectDownloadableVideos = useCallback((mode) => {
+    const successResults = results.filter((r) => r.status === 'success' && r.videos?.length > 0);
+    const pickBest = (r) => {
+      const first = (r.videos || []).find((v) => v?.url && typeof v.url === 'string' && v.url.startsWith('http'));
+      return first ? { ...first, tweetUrl: r.tweetUrl } : null;
+    };
+    if (mode === 'best') {
+      return successResults.map(pickBest).filter(Boolean);
+    }
+    const matched = successResults.flatMap((r) =>
+      (r.videos || [])
+        .filter((v) => v?.url && typeof v.url === 'string' && v.url.startsWith('http') && matchesQuality(v, mode))
+        .map((v) => ({ ...v, tweetUrl: r.tweetUrl }))
+    );
+    if (matched.length > 0) return matched;
+    return successResults.map(pickBest).filter(Boolean);
+  }, [results]);
+
+  const requestDownload = useCallback((payload) => {
+    if (links.length === 0) {
+      setPasteLinksModalReason('no_links');
+      setShowPasteLinksModal(true);
+      return;
+    }
+    if (isBulkDownloading) return;
+    if (isProcessing) {
+      setPendingDownload(payload);
+      return;
+    }
+    if (!isLoggedIn) {
+      if (links.length > 1) {
+        promptGuestSignIn('multi');
+        return;
+      }
+      if (payload.type === 'zip') {
+        promptGuestSignIn('multi');
+        return;
+      }
+      if (isGuestLimitReached()) {
+        promptGuestSignIn('limit');
+        return;
+      }
+    }
+    const needsAnalysis = getLinksNeedingAnalysis(links, results, { retryErrors: true }).length > 0;
+    if (needsAnalysis) {
+      setPendingDownload(payload);
+      setAnalyzeRequested(true);
+      handleDownloadRef.current({ showSignInToast: false, retryErrors: true });
+      return;
+    }
+    if (payload.type === 'quality') {
+      handleDownloadByQualityRef.current?.(payload.mode);
+    } else if (payload.type === 'zip') {
+      handleDownloadAsZipRef.current?.();
+    }
+  }, [links, results, isLoggedIn, isBulkDownloading, isProcessing, promptGuestSignIn]);
+
+  const handleGuestDownloadClick = useCallback(
+    (e) => {
+      e.stopPropagation();
+      setError(null);
+      if (isLoggedIn) return;
+      if (isGuestLimitReached()) {
+        e.preventDefault();
+        promptGuestSignIn('limit');
+        return;
+      }
+      recordGuestDownloads(1);
+    },
+    [isLoggedIn, promptGuestSignIn]
+  );
+
   const handleDownloadByQuality = useCallback(
     async (mode) => {
-      if (!isLoggedIn) {
-        if (links.length > 1) {
-          promptGuestSignIn('multi');
-          return;
-        }
-        const preCheckResults = results.filter((r) => r.status === 'success' && r.videos?.length > 0);
-        if (preCheckResults.length > 1) {
-          promptGuestSignIn('multi');
-          return;
-        }
-      }
-      const successResults = results.filter((r) => r.status === 'success' && r.videos?.length > 0);
-      const allVideos =
-        mode === 'best'
-          ? successResults
-              .map((r) => {
-                const first = (r.videos || []).find((v) => v?.url && typeof v.url === 'string' && v.url.startsWith('http'));
-                return first ? { ...first, tweetUrl: r.tweetUrl } : null;
-              })
-              .filter(Boolean)
-          : successResults.flatMap((r) =>
-              (r.videos || [])
-                .filter((v) => v?.url && typeof v.url === 'string' && v.url.startsWith('http') && matchesQuality(v, mode))
-                .map((v) => ({ ...v, tweetUrl: r.tweetUrl }))
-            );
+      const allVideos = collectDownloadableVideos(mode);
       if (allVideos.length === 0) {
-        setPasteLinksModalReason(links.length > 0 || results.length > 0 ? 'no_media' : 'no_links');
-        setShowPasteLinksModal(true);
+        const failed = results.find((r) => r.status === 'error');
+        if (failed?.error) {
+          setError(failed.error);
+        } else {
+          setPasteLinksModalReason('no_media');
+          setShowPasteLinksModal(true);
+        }
         return;
       }
       setIsBulkDownloading(true);
@@ -411,27 +555,23 @@ export default function BulkDownloadSection({
         a.click();
         document.body.removeChild(a);
       }
+      if (!isLoggedIn) recordGuestDownloads(1);
       setIsBulkDownloading(false);
     },
-    [results, lang, isLoggedIn, links.length, promptGuestSignIn]
+    [results, collectDownloadableVideos, isLoggedIn]
   );
   handleDownloadByQualityRef.current = handleDownloadByQuality;
 
   const handleDownloadAsZip = useCallback(async () => {
-    if (!isLoggedIn) {
-      promptGuestSignIn('multi');
-      return;
-    }
-    const successResults = results.filter((r) => r.status === 'success' && r.videos?.length > 0);
-    const allVideos = successResults
-      .map((r) => {
-        const first = (r.videos || []).find((v) => v?.url && typeof v.url === 'string' && v.url.startsWith('http'));
-        return first ? { ...first, tweetUrl: r.tweetUrl } : null;
-      })
-      .filter(Boolean);
+    const allVideos = collectDownloadableVideos('best');
     if (allVideos.length === 0) {
-      setPasteLinksModalReason(links.length > 0 || results.length > 0 ? 'no_media' : 'no_links');
-      setShowPasteLinksModal(true);
+      const failed = results.find((r) => r.status === 'error');
+      if (failed?.error) {
+        setError(failed.error);
+      } else {
+        setPasteLinksModalReason('no_media');
+        setShowPasteLinksModal(true);
+      }
       return;
     }
     setIsBulkDownloading(true);
@@ -462,17 +602,28 @@ export default function BulkDownloadSection({
       setError(err?.message || (common.zipDownloadFailed || (lang === 'tr' ? 'ZIP oluşturulamadı.' : lang === 'de' ? 'ZIP konnte nicht erstellt werden.' : lang === 'es' ? 'No se pudo crear el ZIP.' : 'ZIP could not be created.')));
     }
     setIsBulkDownloading(false);
-  }, [results, lang, isLoggedIn, promptGuestSignIn]);
+  }, [results, collectDownloadableVideos, lang, common, videoNotFoundFriendly]);
 
   handleDownloadAsZipRef.current = handleDownloadAsZip;
 
-  // Analiz biter bitmez bekleyen analizi tetikle
+  // Analiz biter bitmez bekleyen indirmeyi tetikle
   useEffect(() => {
     if (typeof window === 'undefined' || !pendingDownload || isProcessing) return;
-    const successResults = results.filter((r) => r.status === 'success' && r.videos?.length > 0);
-    const hasAny = successResults.some((r) => (r.videos || []).some((v) => v?.url && typeof v.url === 'string' && v.url.startsWith('http')));
-    if (!hasAny) {
+    const allVideos = collectDownloadableVideos(pendingDownload.type === 'quality' ? pendingDownload.mode : 'best');
+    if (allVideos.length === 0) {
+      const payload = pendingDownload;
       setPendingDownload(null);
+      if (links.length === 0) return;
+      const failed = results.find((r) => r.status === 'error');
+      if (failed?.error) {
+        setError(failed.error);
+      } else if (getLinksNeedingAnalysis(links, results, { retryErrors: true }).length > 0) {
+        setPasteLinksModalReason('analyzing');
+        setShowPasteLinksModal(true);
+      } else {
+        setPasteLinksModalReason('no_media');
+        setShowPasteLinksModal(true);
+      }
       return;
     }
     const payload = pendingDownload;
@@ -482,7 +633,7 @@ export default function BulkDownloadSection({
     } else if (payload.type === 'zip' && handleDownloadAsZipRef.current) {
       handleDownloadAsZipRef.current();
     }
-  }, [pendingDownload, isProcessing, results]);
+  }, [pendingDownload, isProcessing, results, links, collectDownloadableVideos, videoNotFoundFriendly]);
 
   const extractTimeoutRef = useRef(null);
   const handleChange = useCallback((e) => {
@@ -490,6 +641,8 @@ export default function BulkDownloadSection({
     setRawText(text);
     clearTimeout(extractTimeoutRef.current);
     extractTimeoutRef.current = setTimeout(() => {
+      setAnalyzeRequested(false);
+      setSignInToast(null);
       setLinks(extractTwitterUrls(text));
     }, 300);
   }, []);
@@ -499,31 +652,19 @@ export default function BulkDownloadSection({
   const clearAndReset = useCallback(() => {
     clearTimeout(extractTimeoutRef.current);
     extractTimeoutRef.current = null;
+    prevLinksKeyRef.current = '';
     setRawText('');
     setLinks([]);
     setResults([]);
-    setThumbByStatusId({});
+    setBulkThumbnails({});
     setError(null);
     setSaveHistoryMessage(null);
+    setAnalyzeRequested(false);
+    setSignInToast(null);
   }, []);
 
   const removeLink = useCallback((urlToRemove) => {
-    const statusId = getStatusId(urlToRemove);
-    setLinks((prev) => {
-      const nextLinks = prev.filter((u) => u !== urlToRemove);
-      if (statusId) {
-        const stillUsed = nextLinks.some((u) => getStatusId(u) === statusId);
-        if (!stillUsed) {
-          setThumbByStatusId((thumbs) => {
-            if (!thumbs[statusId]) return thumbs;
-            const next = { ...thumbs };
-            delete next[statusId];
-            return next;
-          });
-        }
-      }
-      return nextLinks;
-    });
+    setLinks((prev) => prev.filter((u) => u !== urlToRemove));
     setRawText((prev) => {
       const escaped = urlToRemove.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       return prev
@@ -542,14 +683,7 @@ export default function BulkDownloadSection({
   const downloadLabel = downloadTemplate.replace('{n}', String(count));
   const successResults = results.filter((r) => r.status === 'success' && r.videos?.length > 0);
 
-  const linkToResult = (() => {
-    const m = new Map();
-    for (const r of results) {
-      const id = getStatusId(r?.tweetUrl);
-      if (id) m.set(id, r);
-    }
-    return m;
-  })();
+  const linkToResult = buildResultsByStatusId(results);
 
   const BAND_ORDER = ['1080p', '720p', '480p', '360p', 'photo', 'other'];
   const availableQualities = (() => {
@@ -597,7 +731,7 @@ export default function BulkDownloadSection({
           <div className="flex flex-col gap-2 pt-2">
             <button
               type="button"
-              onClick={() => links.length > 0 && handleDownloadRef.current()}
+              onClick={() => links.length > 0 && requestAnalyze(true)}
               disabled={isProcessing || links.length === 0}
               className="bg-green-600 hover:bg-green-700 w-full touch-target rounded-xl font-bold text-sm shadow-lg shadow-green-200 active:scale-95 transition flex items-center justify-center gap-2 text-white disabled:pointer-events-none"
               aria-label={wbsAnalyzeLabel}
@@ -639,7 +773,7 @@ export default function BulkDownloadSection({
             {links.map((url) => {
               const statusId = getStatusId(url);
               const r = statusId ? (linkToResult.get(statusId) ?? null) : null;
-              const previewThumb = getPreviewThumbnail(url, linkToResult, thumbByStatusId);
+              const previewThumb = getBulkLinkThumbnail(url, bulkThumbnails);
               return (
               <div
                 key={statusId || url}
@@ -661,32 +795,57 @@ export default function BulkDownloadSection({
                   )}
                 </div>
                 <div className="min-w-0 flex-1 overflow-hidden flex items-center gap-2">
-                  {!r ? (
-                    <span className="text-[12px] text-gray-500">{isProcessing ? (processingLabel || 'Video analiz ediliyor...') : (videoNotFoundLabel || 'Video alınamadı')}</span>
-                  ) : r?.status === 'error' ? (
-                    <>
-                      <span className="text-[12px] text-amber-600 flex-1 min-w-0 break-words leading-snug" title={r?.error}>
-                        {r?.error || videoNotFoundLabel}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => removeLink(url)}
-                        className={`shrink-0 text-[11px] font-medium px-2.5 py-1.5 rounded-md border transition ${removeClass}`}
-                        aria-label={removeLabel}
-                      >
-                        {removeLabel}
-                      </button>
-                    </>
-                  ) : (
-                    <MetadataIcons
-                      durationSec={r?.metadata?.duration}
-                      likes={r?.metadata?.likes}
-                      retweets={r?.metadata?.retweets}
-                      views={r?.metadata?.views}
-                      created_at={r?.metadata?.created_at}
-                      created_timestamp={r?.metadata?.created_timestamp}
-                    />
-                  )}
+                  {(() => {
+                    const linkLabel = getLinkErrorLabel(r);
+                    if (linkLabel) {
+                      return (
+                        <>
+                          <span
+                            className={`text-[12px] flex-1 min-w-0 break-words leading-snug ${isBulkGuest || r?.status === 'error' ? 'text-amber-600' : 'text-gray-500'}`}
+                            title={r?.status === 'error' && !isBulkGuest ? r?.error : undefined}
+                          >
+                            {linkLabel}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => removeLink(url)}
+                            className={`shrink-0 text-[11px] font-medium px-2.5 py-1.5 rounded-md border transition ${removeClass}`}
+                            aria-label={removeLabel}
+                          >
+                            {removeLabel}
+                          </button>
+                        </>
+                      );
+                    }
+                    if (!r && isProcessing) {
+                      return <span className="text-[12px] text-gray-500">{processingLabel}</span>;
+                    }
+                    if (r) {
+                      return (
+                        <MetadataIcons
+                          durationSec={r?.metadata?.duration}
+                          likes={r?.metadata?.likes}
+                          retweets={r?.metadata?.retweets}
+                          views={r?.metadata?.views}
+                          created_at={r?.metadata?.created_at}
+                          created_timestamp={r?.metadata?.created_timestamp}
+                        />
+                      );
+                    }
+                    return (
+                      <>
+                        <span className="flex-1 min-w-0" aria-hidden />
+                        <button
+                          type="button"
+                          onClick={() => removeLink(url)}
+                          className={`shrink-0 text-[11px] font-medium px-2.5 py-1.5 rounded-md border transition ${removeClass}`}
+                          aria-label={removeLabel}
+                        >
+                          {removeLabel}
+                        </button>
+                      </>
+                    );
+                  })()}
                 </div>
               </div>
               );
@@ -698,8 +857,12 @@ export default function BulkDownloadSection({
         <p className="text-sm text-gray-500 animate-pulse">{processingLabel}</p>
       )}
 
-      {error && (
-        <div className={`rounded-xl border px-4 py-3 text-sm ${error === rateLimitMessage ? 'text-amber-800 bg-amber-50 border-amber-200' : 'text-red-700 bg-red-50 border-red-200'} ${resultClass}`}>
+      {error && (!(error === bulkSignInRequiredLabel) || analyzeRequested) && (
+        <div className={`rounded-xl border px-4 py-3 text-sm ${
+          error === rateLimitMessage || error === bulkSignInRequiredLabel
+            ? 'text-amber-800 bg-amber-50 border-amber-200'
+            : 'text-red-700 bg-red-50 border-red-200'
+        } ${resultClass}`}>
           {error}
         </div>
       )}
@@ -743,17 +906,7 @@ export default function BulkDownloadSection({
               onClick={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
-                if (links.length === 0) {
-                  setPasteLinksModalReason('no_links');
-                  setShowPasteLinksModal(true);
-                  return;
-                }
-                if (isBulkDownloading) return;
-                if (isProcessing) {
-                  setPendingDownload({ type: 'quality', mode });
-                  return;
-                }
-                handleDownloadByQuality(mode);
+                requestDownload({ type: 'quality', mode });
               }}
               disabled={isBulkDownloading}
               className="w-full sm:flex-1 sm:min-w-[80px] flex items-center justify-center gap-1.5 min-h-[44px] px-3 py-3 sm:py-2 rounded-lg font-semibold text-sm transition-colors disabled:cursor-not-allowed bg-green-600 hover:bg-green-700 text-white touch-target"
@@ -773,17 +926,7 @@ export default function BulkDownloadSection({
             onClick={(e) => {
               e.preventDefault();
               e.stopPropagation();
-              if (links.length === 0) {
-                setPasteLinksModalReason('no_links');
-                setShowPasteLinksModal(true);
-                return;
-              }
-              if (isBulkDownloading) return;
-              if (isProcessing) {
-                setPendingDownload({ type: 'zip' });
-                return;
-              }
-              handleDownloadAsZip();
+              requestDownload({ type: 'zip' });
             }}
             disabled={isBulkDownloading}
             className="w-full sm:flex-1 sm:min-w-[80px] flex items-center justify-center gap-1.5 min-h-[44px] px-3 py-3 sm:py-2 rounded-lg font-semibold text-sm transition-colors disabled:cursor-not-allowed bg-green-600 hover:bg-green-700 text-white touch-target"
@@ -836,10 +979,7 @@ export default function BulkDownloadSection({
                           rel="noopener noreferrer"
                           className={`flex items-center justify-center rounded-lg px-4 py-3 sm:py-2.5 min-h-[44px] text-sm font-medium transition-colors ${accentClass}`}
                           title={v.url}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setError(null);
-                          }}
+                          onClick={handleGuestDownloadClick}
                         >
                           {downloadVideoLabel} {label}
                         </a>

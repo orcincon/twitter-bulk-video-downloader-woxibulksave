@@ -7,6 +7,58 @@ function makeToken(email, secret) {
   return createHash('sha256').update(`${email || ''}:${secret}`).digest('hex');
 }
 
+function isMissingColumnError(error) {
+  const message = String(error?.message || '');
+  return error?.code === 'PGRST204' || /column .* does not exist/i.test(message) || /Could not find the '.*' column/.test(message);
+}
+
+async function fetchRegisteredUsers(supabase) {
+  const full = await supabase
+    .from('users')
+    .select('id, email, name, image, preferred_language, created_at, updated_at, access_token')
+    .order('created_at', { ascending: false });
+
+  if (!full.error) return full;
+
+  if (!isMissingColumnError(full.error)) return full;
+
+  console.warn('[kamikaze/users] users fallback:', full.error.message);
+  return supabase
+    .from('users')
+    .select('id, email, name, image, created_at, updated_at')
+    .order('created_at', { ascending: false });
+}
+
+async function fetchGuestAnalysisRows(supabase) {
+  const withMeta = await supabase
+    .from('analysis_logs')
+    .select('client_ip, user_agent, created_at')
+    .eq('user_id', 'guest')
+    .order('created_at', { ascending: false })
+    .limit(2000);
+
+  if (!withMeta.error) return withMeta.data ?? [];
+
+  if (!isMissingColumnError(withMeta.error)) {
+    console.warn('[kamikaze/users] guests:', withMeta.error.message);
+    return [];
+  }
+
+  const fallback = await supabase
+    .from('analysis_logs')
+    .select('created_at')
+    .eq('user_id', 'guest')
+    .order('created_at', { ascending: false })
+    .limit(2000);
+
+  if (fallback.error) {
+    console.warn('[kamikaze/users] guests fallback:', fallback.error.message);
+    return [];
+  }
+
+  return fallback.data ?? [];
+}
+
 export async function GET() {
   const allowedEmail = (process.env.KAMIKAZE_EMAIL || '').trim().toLowerCase();
   const allowedSecret = (process.env.KAMIKAZE_SECRET || '').trim();
@@ -27,18 +79,9 @@ export async function GET() {
   }
 
   try {
-    const [usersRes, guestsRes] = await Promise.all([
-      supabase
-        .from('users')
-        .select('id, email, name, image, preferred_language, created_at, updated_at, access_token')
-        .order('created_at', { ascending: false }),
-      supabase
-        .from('analysis_logs')
-        .select('client_ip, user_agent, created_at')
-        .eq('user_id', 'guest')
-        .not('client_ip', 'is', null)
-        .order('created_at', { ascending: false })
-        .limit(2000),
+    const [usersRes, guestRows] = await Promise.all([
+      fetchRegisteredUsers(supabase),
+      fetchGuestAnalysisRows(supabase),
     ]);
 
     if (usersRes.error) {
@@ -48,7 +91,7 @@ export async function GET() {
 
     const guests = [];
     const byIp = new Map();
-    for (const row of guestsRes.data ?? []) {
+    for (const row of guestRows) {
       const ip = row.client_ip || '—';
       if (!byIp.has(ip)) {
         byIp.set(ip, { client_ip: ip, user_agent: row.user_agent || null, count: 0, last_seen: row.created_at });

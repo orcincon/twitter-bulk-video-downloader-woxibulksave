@@ -1,7 +1,10 @@
 import type { Metadata } from "next";
+import { Suspense } from "react";
 import { Inter } from "next/font/google";
 import "./globals.css";
 import SessionProvider from "../components/SessionProvider.js";
+import DevMobilePreview from "../components/DevMobilePreview.js";
+import VisitTracker from "../components/VisitTracker.js";
 import { JsonLd } from "../components/JsonLd.js";
 import FontAwesomeAsync from "../components/FontAwesomeAsync.js";
 import { BRAND, SEO_BY_LANG, buildRootJsonLd, getBaseUrl } from "../lib/seo.js";
@@ -57,7 +60,11 @@ export const metadata: Metadata = {
     description: defaultSeo.description,
   },
   icons: {
-    icon: "/icon.png",
+    icon: [
+      { url: "/favicon.ico", sizes: "any" },
+      { url: "/icon.png", type: "image/png", sizes: "48x48" },
+    ],
+    shortcut: "/favicon.ico",
     apple: "/logo.png",
   },
   manifest: "/manifest.webmanifest",
@@ -81,6 +88,9 @@ export default function RootLayout({
   return (
     <html lang="tr" className="scroll-smooth">
       <head>
+        <link rel="icon" href="/favicon.ico" sizes="any" />
+        <link rel="icon" href="/icon.png" type="image/png" sizes="48x48" />
+        <link rel="apple-touch-icon" href="/logo.png" />
         <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossOrigin="anonymous" />
         <noscript>
           <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" />
@@ -89,8 +99,16 @@ export default function RootLayout({
       <body className={`${inter.variable} font-sans antialiased text-slate-900`} style={{ backgroundColor: '#f4f9ff' }}>
         <SessionProvider>
           <FontAwesomeAsync />
+          <Suspense fallback={null}>
+            <VisitTracker />
+          </Suspense>
           <JsonLd data={jsonLd} />
           {children}
+          {process.env.NODE_ENV === "development" ? (
+            <Suspense fallback={null}>
+              <DevMobilePreview />
+            </Suspense>
+          ) : null}
         </SessionProvider>
       </body>
     </html>

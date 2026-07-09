@@ -70,7 +70,7 @@ export default async function Home({ searchParams }) {
   const layout = getLayoutTranslations(lang, '');
   const logId = typeof params?.logId === 'string' && params.logId.length > 10 ? params.logId : null;
 
-  const signInClass = 'x-button text-white px-3 py-1.5 rounded-full text-[18px] font-bold flex items-center justify-center gap-1.5 hover:opacity-90 transition shadow-lg min-h-[44px]';
+  const headerSignInClass = 'x-button text-white inline-flex items-center justify-center rounded-full w-11 h-11 min-h-[44px] min-w-[44px] p-0 hover:opacity-90 transition shadow-lg';
   const historyHref = lang && lang !== 'en' ? `/gecmis?lang=${lang}` : '/gecmis';
   const h = layout.pages?.home || {};
 
@@ -84,19 +84,20 @@ export default async function Home({ searchParams }) {
           signOutLabel={layout.header?.signOut}
           historyHref={historyHref}
           historyLabel={layout.header?.history}
-          signInClass={signInClass}
+          faqLabel={layout.footer?.faq}
+          lang={lang}
+          signInClass={headerSignInClass}
+          iconOnly
         />
       </SiteHeader>
 
       <main className="flex-grow w-full">
-        <header className="wbs-gradient text-white pt-10 pb-24 px-4">
+        <header className="wbs-gradient text-white pt-10 pb-24 px-4 overflow-x-hidden">
           <div className="max-w-2xl mx-auto text-center">
-            <h1 className="text-[20px] sm:text-[20px] font-black mb-4 leading-tight">
-              {h.heroTitle1 || 'X (Twitter) Videolarını'} <br />{h.heroTitle2 || 'Toplu Analiz Edin'}
+            <h1 className="mx-auto w-max max-w-full text-[clamp(11px,3.4vw,20px)] sm:text-[18px] md:text-[20px] font-black mb-8 leading-snug tracking-tight">
+              <span className="block whitespace-nowrap">{h.heroTitle1 || 'WBS ile X (Twitter) gönderi videolarını'}</span>
+              <span className="block whitespace-nowrap">{h.heroTitle2 || 'ister tek tek veya toplu analiz edin'}</span>
             </h1>
-            <p className="text-blue-100 text-[18px] mb-8 opacity-90 italic">
-              {t.description || h.whySubtitle || 'Floodları ve medya içeriklerini saniyeler içinde analiz edin.'}
-            </p>
             <div className="max-w-2xl mx-auto">
               <BulkDownloadSection
                 variant="wbs"
@@ -171,26 +172,28 @@ export default async function Home({ searchParams }) {
         </section>
 
         <section className="max-w-xl mx-auto px-4 py-16 sm:py-20">
-          <div className="bg-black text-white p-8 rounded-[2rem] text-center shadow-2xl">
+          <div className="bg-gradient-to-br from-[#1d9bf0] via-[#1a9fd4] to-emerald-500 text-white p-8 rounded-[2rem] text-center shadow-2xl border border-white/20">
             <i className="fa-brands fa-x-twitter text-4xl mb-4" aria-hidden />
             <h2 className="text-[20px] font-black mb-3 italic">{h.historyBoxTitle || 'Analiz Arşiviniz'}</h2>
-            <p className="text-slate-400 text-[18px] mb-8 leading-relaxed">
-              {h.historyBoxText || 'X kullanıcı girişi yapan kullanıcılarımızın analiz geçmişi profillerine otomatik eklenir. Arşivim sayfasından takip edebilirsiniz.'}
+            <p className="text-blue-50 text-[18px] mb-8 leading-relaxed">
+              {h.historyBoxText || 'X kullanıcı girişi yapan (Kesinlikle şifrenizi istemiyoruz) kullanıcılarımızın analiz geçmişi profillerine otomatik eklenir. Arşivim sayfasından takip edebilirsiniz.'}
             </p>
             {session?.user ? (
-              <Link href={historyHref} className="bg-white text-black w-full touch-target rounded-xl font-black text-[18px] hover:bg-slate-100 transition flex items-center justify-center gap-3 min-h-[48px] inline-flex">
+              <Link href={historyHref} className="bg-white text-slate-900 w-full touch-target rounded-xl font-black text-[18px] hover:bg-blue-50 transition flex items-center justify-center gap-3 min-h-[48px] inline-flex shadow-lg">
                 <i className="fa-solid fa-clock-rotate-left" aria-hidden />
                 {layout.header?.history ?? h.mySavedLabel ?? 'Arşivim'}
               </Link>
             ) : (
               <AuthButton
-                accentClass="bg-white text-black hover:bg-slate-100"
+                accentClass="bg-white text-slate-900 hover:bg-blue-50"
                 theme={theme}
                 signInLabel={layout.common?.signInShort ?? 'ile Kullanıcı Girişi'}
                 signOutLabel={layout.header?.signOut}
                 historyHref={historyHref}
                 historyLabel={layout.header?.history}
-                signInClass="bg-white text-black w-full touch-target rounded-xl font-black text-[18px] hover:bg-slate-100 transition flex items-center justify-center gap-3 min-h-[48px]"
+                faqLabel={layout.footer?.faq}
+                lang={lang}
+                signInClass="bg-white text-slate-900 w-full touch-target rounded-xl font-black text-[18px] hover:bg-blue-50 transition flex items-center justify-center gap-3 min-h-[48px] shadow-lg"
               />
             )}
           </div>

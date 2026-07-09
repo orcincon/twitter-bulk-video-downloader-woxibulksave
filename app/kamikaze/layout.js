@@ -1,6 +1,14 @@
 export const metadata = {
-  title: 'Kamikaze — Yönetim Paneli',
-  robots: 'noindex, nofollow',
+  title: { absolute: 'Kamikaze — Yönetim Paneli' },
+  robots: { index: false, follow: false },
+  icons: {
+    icon: [
+      { url: '/favicon.ico', sizes: 'any' },
+      { url: '/icon.png', type: 'image/png', sizes: '48x48' },
+    ],
+    shortcut: '/favicon.ico',
+    apple: '/logo.png',
+  },
 };
 
 export default function KamikazeLayout({ children }) {

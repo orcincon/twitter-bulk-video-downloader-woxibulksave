@@ -57,7 +57,7 @@ export default async function GecmisPage({ searchParams }) {
     <div className="min-h-screen flex flex-col bg-[#E7F3FF]">
       <SiteHeader accentClass={accentClass} layout={layout} lang={lang} isLoggedIn={!!session?.user}>
         <div className="flex flex-col items-end">
-          <AuthButton accentClass={`${accentClass} px-5 py-2 rounded-full text-sm font-bold border transition`} theme={theme} signInLabel={layout.header?.signIn} signOutLabel={layout.header?.signOut} historyHref={lang && lang !== 'en' ? `/gecmis?lang=${lang}` : '/gecmis'} historyLabel={layout.header?.history} />
+          <AuthButton theme={theme} signInLabel={layout.header?.signIn} signOutLabel={layout.header?.signOut} historyHref={lang && lang !== 'en' ? `/gecmis?lang=${lang}` : '/gecmis'} historyLabel={layout.header?.history} faqLabel={layout.footer?.faq} lang={lang} iconOnly />
         </div>
       </SiteHeader>
 

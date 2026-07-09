@@ -6,19 +6,39 @@ import { useSession } from 'next-auth/react';
 import MetadataIcons from './MetadataIcons.js';
 import AuthButton from './AuthButton.js';
 import ConfirmHistoryModal from './ConfirmHistoryModal.js';
+import {
+  getTweetStatusId,
+} from '@/lib/tweet-thumbnails.js';
 
-const STATUS_ID_REGEX = /\/status\/(\d+)/i;
+const ARCHIVE_THUMB_GAP_MS = 200;
 
-function getStatusId(u) {
-  const m = String(u || '').match(STATUS_ID_REGEX);
-  return m ? m[1] : null;
+function isValidThumbUrl(value) {
+  return typeof value === 'string' && value.startsWith('http');
 }
 
-function findResultForUrl(url, results) {
-  if (!Array.isArray(results) || results.length === 0) return null;
-  const id = getStatusId(url);
-  if (!id) return null;
-  return results.find((r) => getStatusId(r?.tweetUrl) === id) ?? null;
+function pickArchiveDisplayUrl(urls) {
+  if (!Array.isArray(urls) || urls.length === 0) return null;
+  return urls[urls.length - 1] || urls[0];
+}
+
+async function fetchArchiveThumbnail(url, statusId) {
+  if (!url || !statusId) return null;
+  try {
+    const params = new URLSearchParams({
+      url: String(url),
+      id: String(statusId),
+    });
+    const res = await fetch(`/api/thumbnail?${params}`, {
+      credentials: 'include',
+      cache: 'no-store',
+    });
+    if (!res.ok) return null;
+    const data = await res.json().catch(() => null);
+    if (!data || String(data.id) !== String(statusId)) return null;
+    return isValidThumbUrl(data.thumbnail) ? data.thumbnail : null;
+  } catch {
+    return null;
+  }
 }
 
 const FALLBACK = {
@@ -40,7 +60,7 @@ export default function HistoryContent({ lang = 'en', layout = {}, accentClass, 
   const t = layout.pages?.gecmis || {};
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [fetchedThumbs, setFetchedThumbs] = useState({});
+  const [archiveThumbs, setArchiveThumbs] = useState({});
   const [fetchedMetadata, setFetchedMetadata] = useState({});
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmPayload, setConfirmPayload] = useState(null);
@@ -76,7 +96,7 @@ export default function HistoryContent({ lang = 'en', layout = {}, accentClass, 
     if (sessionStatus === 'loading') return;
     if (!authenticated) {
       setLogs([]);
-      setFetchedThumbs({});
+      setArchiveThumbs({});
       setFetchedMetadata({});
       setLoading(false);
       return;
@@ -123,37 +143,39 @@ export default function HistoryContent({ lang = 'en', layout = {}, accentClass, 
   };
 
   useEffect(() => {
-    if (!logs.length) return;
+    if (!logs.length || typeof window === 'undefined') return;
+
     let cancelled = false;
-    const fetchMissing = async () => {
-      for (const log of logs) {
+
+    (async () => {
+      for (let i = 0; i < logs.length; i++) {
         if (cancelled) return;
-        const results = Array.isArray(log?.results_json) ? log.results_json : [];
-        const hasFromJson = results.some((r) => r?.thumbnail);
-        if (hasFromJson) continue;
-        const urls = Array.isArray(log?.urls) ? log.urls : [];
-        const thumbs = [];
-        for (let i = 0; i < urls.length; i++) {
-          if (cancelled) return;
-          try {
-            const statusId = getStatusId(urls[i]);
-            const thumbUrl = statusId
-              ? `/api/thumbnail?url=${encodeURIComponent(urls[i])}&id=${encodeURIComponent(statusId)}`
-              : `/api/thumbnail?url=${encodeURIComponent(urls[i])}`;
-            const res = await fetch(thumbUrl, { credentials: 'include', cache: 'no-store' });
-            const data = await res.json();
-            thumbs.push(data?.thumbnail || null);
-          } catch (_) {
-            thumbs.push(null);
-          }
-          if (i < urls.length - 1) await new Promise((r) => setTimeout(r, 150));
+
+        const log = logs[i];
+        const logId = log?.id;
+        if (!logId) continue;
+
+        const displayUrl = pickArchiveDisplayUrl(log.urls);
+        const statusId = getTweetStatusId(displayUrl);
+        if (!displayUrl || !statusId) continue;
+
+        const thumbnail = await fetchArchiveThumbnail(displayUrl, statusId);
+        if (cancelled || !thumbnail) continue;
+
+        setArchiveThumbs((prev) => {
+          if (prev[logId] === thumbnail) return prev;
+          return { ...prev, [logId]: thumbnail };
+        });
+
+        if (i < logs.length - 1) {
+          await new Promise((resolve) => setTimeout(resolve, ARCHIVE_THUMB_GAP_MS));
         }
-        if (cancelled) return;
-        if (thumbs.some(Boolean)) setFetchedThumbs((prev) => ({ ...prev, [log.id]: thumbs }));
       }
+    })();
+
+    return () => {
+      cancelled = true;
     };
-    fetchMissing();
-    return () => { cancelled = true; };
   }, [logs]);
 
   useEffect(() => {
@@ -164,15 +186,10 @@ export default function HistoryContent({ lang = 'en', layout = {}, accentClass, 
         if (cancelled) return;
         const urls = Array.isArray(log?.urls) ? log.urls : [];
         const results = Array.isArray(log?.results_json) ? log.results_json : [];
-        const urlToResult = new Map();
-        for (const r of results) {
-          const id = getStatusId(r?.tweetUrl);
-          if (id) urlToResult.set(id, r);
-        }
         const metaByUrl = {};
         for (let i = 0; i < urls.length; i++) {
           if (cancelled) return;
-          const r = findResultForUrl(urls[i], results);
+          const r = results.find((row) => getTweetStatusId(row?.tweetUrl) === getTweetStatusId(urls[i]));
           if (r?.metadata) continue;
           try {
             const res = await fetch(`/api/tweet-metadata?url=${encodeURIComponent(urls[i])}`, { credentials: 'include' });
@@ -200,22 +217,25 @@ export default function HistoryContent({ lang = 'en', layout = {}, accentClass, 
 
   const urlNorm = (u) => (typeof u === 'string' ? u.trim().split('?')[0] : '');
 
-  /** Bir kart = bir log (tek kayıt). İlk URL'in thumbnail ve metadata'sı gösterilir. */
+  /** Bir kart = bir log. Thumbnail ve metadata, o kaydın son linkine göre gösterilir. */
   const buildLogCards = () => {
     return logs.map((log) => {
       const urls = Array.isArray(log?.urls) ? log.urls : [];
       const results = Array.isArray(log?.results_json) ? log.results_json : [];
-      const fetched = fetchedThumbs[log.id] || [];
-      const firstUrl = urls[0];
-      const firstResult = firstUrl ? findResultForUrl(firstUrl, results) : (results[0] ?? null);
-      const firstThumb = firstResult?.thumbnail ?? fetched[0] ?? null;
+      const displayUrl = pickArchiveDisplayUrl(urls);
+      const displayStatusId = getTweetStatusId(displayUrl);
+      const displayResult = displayStatusId
+        ? results.find((r) => getTweetStatusId(r?.tweetUrl) === displayStatusId)
+        : null;
       const metaMap = fetchedMetadata[log.id] || {};
-      const firstMeta = firstResult ? (firstResult?.metadata ?? metaMap[urlNorm(firstUrl)]) : null;
+      const displayMeta = displayResult
+        ? (displayResult?.metadata ?? metaMap[urlNorm(displayUrl)])
+        : null;
       return {
         key: log.id,
         log,
-        thumbnail: firstThumb,
-        metadata: firstMeta,
+        thumbnail: archiveThumbs[log.id] || null,
+        metadata: displayMeta,
         created_at: log.created_at,
       };
     });
@@ -245,7 +265,7 @@ export default function HistoryContent({ lang = 'en', layout = {}, accentClass, 
             <>
               <p className="text-gray-600 text-xs mt-3">{emptyLoginHint}</p>
               <div className="mt-4">
-                <AuthButton accentClass={accentClass} theme={theme} signInLabel={layout.header?.signIn} signOutLabel={layout.header?.signOut} historyHref={lang && lang !== 'en' ? `/gecmis?lang=${lang}` : '/gecmis'} historyLabel={layout.header?.history} />
+                <AuthButton accentClass={accentClass} theme={theme} signInLabel={layout.header?.signIn} signOutLabel={layout.header?.signOut} historyHref={lang && lang !== 'en' ? `/gecmis?lang=${lang}` : '/gecmis'} historyLabel={layout.header?.history} faqLabel={layout.footer?.faq} lang={lang} />
               </div>
             </>
           )}
@@ -291,6 +311,7 @@ export default function HistoryContent({ lang = 'en', layout = {}, accentClass, 
             {card.thumbnail ? (
               <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-lg overflow-hidden bg-gray-200 shrink-0">
                 <img
+                  key={`${card.key}-${card.thumbnail}`}
                   src={card.thumbnail}
                   alt="WBS - X/Twitter video önizleme"
                   width={56}

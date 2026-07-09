@@ -7,7 +7,7 @@ import Link from 'next/link';
 const LANG_LABELS = { en: 'English', tr: 'Türkçe', de: 'Deutsch', es: 'Español' };
 const LANG_SHORT = { en: 'EN', tr: 'TR', de: 'DE', es: 'ES' };
 
-export default function LanguageSwitcher({ currentLang, theme = 'dark', variant = 'dropdown', lightText = false }) {
+export default function LanguageSwitcher({ currentLang, theme = 'dark', variant = 'dropdown', lightText = false, placement = 'default' }) {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const [open, setOpen] = useState(false);
@@ -28,7 +28,12 @@ export default function LanguageSwitcher({ currentLang, theme = 'dark', variant 
   };
 
   const textClass = lightText ? 'text-white/90 hover:text-white' : 'text-gray-600 hover:text-gray-900';
-  const bgClass = 'bg-white border-gray-300';
+  const bgClass = placement === 'header'
+    ? 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
+    : 'bg-white border-gray-300';
+  const triggerClass = placement === 'header'
+    ? `flex items-center justify-center gap-1 min-w-[44px] min-h-[44px] px-2.5 rounded-lg border text-xs font-bold transition ${bgClass}`
+    : `flex items-center gap-1.5 px-3 py-2.5 min-h-[44px] sm:min-h-0 sm:py-1.5 rounded-lg border text-xs font-medium transition ${bgClass} ${textClass}`;
 
   if (variant === 'inline') {
     return (
@@ -52,10 +57,10 @@ export default function LanguageSwitcher({ currentLang, theme = 'dark', variant 
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className={`flex items-center gap-1.5 px-3 py-2.5 min-h-[44px] sm:min-h-0 sm:py-1.5 rounded-lg border text-xs font-medium transition ${bgClass} ${textClass}`}
+        className={triggerClass}
         aria-expanded={open}
         aria-haspopup="listbox"
-        aria-label="Select language"
+        aria-label="Dil seçin"
       >
         <span>{LANG_SHORT[currentLang] || 'EN'}</span>
         <svg className={`w-3 h-3 transition-transform ${open ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -65,13 +70,13 @@ export default function LanguageSwitcher({ currentLang, theme = 'dark', variant 
       {open && (
         <ul
           role="listbox"
-          className="absolute right-0 top-full mt-1 min-w-[140px] py-1 rounded-lg border border-gray-200 bg-white shadow-xl z-50 overflow-hidden"
+          className="absolute right-0 top-full mt-2 min-w-[148px] py-1 rounded-xl border border-slate-200 bg-white shadow-xl z-[60] overflow-hidden"
         >
           {Object.entries(LANG_LABELS).map(([code, label]) => (
             <li key={code} role="option" aria-selected={currentLang === code}>
               <Link
                 href={setLang(code)}
-                className={`block px-4 py-3 sm:py-2 min-h-[44px] sm:min-h-0 flex items-center text-sm transition ${currentLang === code ? 'bg-gray-100 font-medium' : 'hover:bg-gray-50'} ${textClass}`}
+                className={`block px-4 py-3 sm:py-2.5 min-h-[44px] sm:min-h-0 flex items-center text-sm transition ${currentLang === code ? 'bg-blue-50 font-semibold text-[#1686d4]' : 'text-slate-700 hover:bg-slate-50'}`}
                 onClick={() => {
                   setOpen(false);
                   fetch('/api/user-preferences', {

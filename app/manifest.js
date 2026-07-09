@@ -15,7 +15,8 @@ export default function manifest() {
     orientation: "portrait-primary",
     categories: ["utilities", "productivity"],
     icons: [
-      { src: "/icon.png", sizes: "any", type: "image/png", purpose: "any" },
+      { src: "/icon.png", sizes: "48x48", type: "image/png", purpose: "any" },
+      { src: "/favicon.ico", sizes: "32x32", type: "image/x-icon", purpose: "any" },
       { src: "/logo.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
     ],
     prefer_related_applications: false,

@@ -1,0 +1,19 @@
+---
+description: README.md is SEO-fixed and must never be modified
+alwaysApply: true
+---
+
+# README.md — Do Not Modify
+
+The root `README.md` file is kept fixed for SEO purposes.
+
+**Never:**
+- Edit, rewrite, or overwrite `README.md`
+- Delete `README.md`
+- Create commits that change `README.md` unless the user explicitly requests that exact file
+
+**Allowed:**
+- Mention the file exists when relevant
+- Suggest changes in chat without applying them to the file
+
+If documentation is needed, use other files (e.g. `ENV_CHECKLIST.md`, `DEPLOY_CORE.txt`) — not `README.md`.

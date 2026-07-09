@@ -1,6 +1,4 @@
 import Link from 'next/link';
-import { Suspense } from 'react';
-import LanguageSwitcher from './LanguageSwitcher.js';
 
 export default function Footer({ theme = 'dark', layout = {}, lang = 'en' }) {
   const f = layout.footer || {};
@@ -18,12 +16,7 @@ export default function Footer({ theme = 'dark', layout = {}, lang = 'en' }) {
             {f.faq || 'SSS'}
           </Link>
         </div>
-        <p className="text-white/90 text-[11px] text-center mb-2 font-medium italic">{f.copyright || '© 2026 WoxiBulkSave'}</p>
-        <div className="mt-4 flex justify-center">
-          <Suspense fallback={<span className="text-[11px] text-white/80">EN</span>}>
-            <LanguageSwitcher currentLang={lang} theme={theme} variant="inline" lightText />
-          </Suspense>
-        </div>
+        <p className="text-white/90 text-[11px] text-center font-medium italic">{f.copyright || '© 2026 WoxiBulkSave'}</p>
       </div>
     </footer>
   );

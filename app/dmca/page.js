@@ -33,9 +33,9 @@ export default async function DmcaPage({ searchParams }) {
 
   return (
     <div className="min-h-screen flex flex-col bg-[#E7F3FF]">
-      <SiteHeader layout={layout} lang={lang} accentClass="bg-[#1d9bf0] hover:bg-[#1686d4] text-white border border-[#1d9bf0]" isLoggedIn={!!session?.user}>
+      <SiteHeader layout={layout} lang={lang} isLoggedIn={!!session?.user} accentClass="bg-[#1d9bf0] hover:bg-[#1686d4] text-white border border-[#1d9bf0]">
         <div className="flex flex-col items-end">
-          <AuthButton accentClass="bg-[#1d9bf0] hover:bg-[#1686d4] text-white px-5 py-2 rounded-full text-sm font-bold border border-[#1d9bf0] transition" theme="dark" signInLabel={layout.header?.signIn} signOutLabel={layout.header?.signOut} historyHref={lang && lang !== 'en' ? `/gecmis?lang=${lang}` : '/gecmis'} historyLabel={layout.header?.history} />
+          <AuthButton theme="dark" signInLabel={layout.header?.signIn} signOutLabel={layout.header?.signOut} historyHref={lang && lang !== 'en' ? `/gecmis?lang=${lang}` : '/gecmis'} historyLabel={layout.header?.history} faqLabel={layout.footer?.faq} lang={lang} iconOnly />
         </div>
       </SiteHeader>
 

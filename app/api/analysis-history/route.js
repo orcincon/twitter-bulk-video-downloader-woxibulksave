@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { getSessionSafe } from '@/lib/auth.js';
 import { createSupabaseClient, ensureUserInSupabase } from '@/lib/supabase.js';
 import { insertAnalysisLog } from '@/lib/analysis-log.js';
+import { getClientIp, getUserAgent } from '@/lib/request-client.js';
 
 /** WBS: Sadece analysis_logs tablosu (UNRESTRICTED). analysis_history tablosu kullanılmaz. */
 const TABLE_NAME = 'analysis_logs';
@@ -90,10 +91,8 @@ export async function POST(request) {
 
   try {
     const session = await getSessionAndEnsureUser();
-    const userId = getHistoryUserId(session);
-    if (!userId) {
-      return NextResponse.json({ ok: false, error: 'Unauthorized', code: 'AUTH_REQUIRED' }, { status: 401 });
-    }
+    const loggedInUserId = getHistoryUserId(session);
+    const userId = loggedInUserId || 'guest';
     const supabase = createSupabaseClient();
 
     if (!supabase) {
@@ -118,6 +117,12 @@ export async function POST(request) {
       link_count: urls.length,
       video_count: videoCount,
       language,
+      ...(loggedInUserId
+        ? {}
+        : {
+            client_ip: getClientIp(request),
+            user_agent: getUserAgent(request),
+          }),
     });
 
     if (!out.ok) {

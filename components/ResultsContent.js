@@ -66,11 +66,6 @@ export default function ResultsContent({
         setIsProcessing(false);
         return;
       }
-      if (isGuestLimitReached()) {
-        setSignInToast('limit');
-        setIsProcessing(false);
-        return;
-      }
     }
     if (initialLogId) {
       if (loadedLogIdRef.current === initialLogId) return;
@@ -125,11 +120,6 @@ export default function ResultsContent({
         setIsProcessing(false);
         return;
       }
-      if (isGuestLimitReached()) {
-        setSignInToast('limit');
-        setIsProcessing(false);
-        return;
-      }
     }
 
     const urlsToAnalyze = urls;
@@ -158,9 +148,18 @@ export default function ResultsContent({
 
         if (data.success && Array.isArray(data.results)) {
           setResults(data.results);
-          if (!isLoggedIn && typeof window !== 'undefined') {
-            const successCount = data.results.filter((r) => r.status === 'success' && r.videos?.length > 0).length;
-            if (successCount > 0) recordGuestDownloads(successCount);
+          const hasSuccess = data.results.some((r) => r.status === 'success' && r.videos?.length > 0);
+          if (hasSuccess) {
+            fetch('/api/analysis-history', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                urls: urlsToAnalyze,
+                results: data.results,
+                language: (lang || 'en').toUpperCase().slice(0, 2),
+              }),
+              credentials: 'include',
+            }).catch(() => {});
           }
         }
       } catch (err) {
@@ -185,6 +184,10 @@ export default function ResultsContent({
     if (!isLoggedIn) {
       if (urls.length > 1 || downloadMode === 'zip' || successResults.length > 1) {
         setSignInToast('multi');
+        return;
+      }
+      if (isGuestLimitReached()) {
+        setSignInToast('limit');
         return;
       }
     }
@@ -225,8 +228,22 @@ export default function ResultsContent({
         if (i < allVideos.length - 1) await new Promise((r) => setTimeout(r, 800));
       }
     }
+    if (!isLoggedIn) recordGuestDownloads(1);
     setIsBulkDownloading(false);
   }, [allVideos, downloadMode, isLoggedIn, urls.length, successResults.length]);
+
+  const handleGuestDownloadClick = useCallback(
+    (e) => {
+      if (isLoggedIn) return;
+      if (isGuestLimitReached()) {
+        e.preventDefault();
+        setSignInToast('limit');
+        return;
+      }
+      recordGuestDownloads(1);
+    },
+    [isLoggedIn]
+  );
 
   const homeHref = lang !== 'en' ? `/?lang=${lang}` : '/';
 
@@ -336,6 +353,7 @@ export default function ResultsContent({
                         target="_blank"
                         rel="noopener noreferrer"
                         className={`flex items-center justify-center w-full min-h-[44px] px-4 py-3 rounded-lg text-sm font-medium transition ${accentClass}`}
+                        onClick={handleGuestDownloadClick}
                       >
                         {downloadVideoLabel} {label}
                       </a>
@@ -387,6 +405,7 @@ export default function ResultsContent({
                               target="_blank"
                               rel="noopener noreferrer"
                               className={`inline-block px-4 py-2 rounded-lg text-xs font-medium transition min-h-[36px] ${accentClass}`}
+                              onClick={handleGuestDownloadClick}
                             >
                               {downloadVideoLabel} {label}
                             </a>
