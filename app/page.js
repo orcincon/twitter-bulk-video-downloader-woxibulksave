@@ -92,9 +92,9 @@ export default async function Home({ searchParams }) {
       </SiteHeader>
 
       <main className="flex-grow w-full">
-        <header className="wbs-gradient text-white pt-10 pb-24 px-4 overflow-x-hidden">
+        <header className="wbs-gradient text-white pt-3 pb-24 px-4 overflow-x-hidden">
           <div className="max-w-2xl mx-auto text-center">
-            <h1 className="mx-auto w-max max-w-full text-[clamp(11px,3.4vw,20px)] sm:text-[18px] md:text-[20px] font-black mb-8 leading-snug tracking-tight">
+            <h1 className="mx-auto w-max max-w-full text-[clamp(11px,3.4vw,20px)] sm:text-[18px] md:text-[20px] font-black mb-3 leading-snug tracking-tight">
               <span className="block whitespace-nowrap">{h.heroTitle1 || 'X (Twitter) videolarını ve GIF\'leri indirin'}</span>
               <span className="block whitespace-nowrap">{h.heroTitle2 || 'tek tek veya toplu — WoxiBulkSave.com ile'}</span>
             </h1>
@@ -116,7 +116,7 @@ export default async function Home({ searchParams }) {
         <section className="max-w-5xl mx-auto px-4 -mt-12 relative z-10">
           <div className="bg-white rounded-3xl shadow-lg border border-blue-50 p-6 sm:p-10">
             <h2 className="text-[20px] font-black text-center mb-10 text-slate-800">
-              {h.howToTitle || 'WBS ile nasıl video analiz edilir?'}
+              {h.howToTitle || 'WBS ile nasıl video kaydedilir?'}
             </h2>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-8">
               <div className="flex flex-col items-center text-center gap-3">
@@ -149,10 +149,10 @@ export default async function Home({ searchParams }) {
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="step-number">3</span>
-                  <h3 className="font-bold text-[20px] text-slate-800">{h.step3Title || 'Analiz edin'}</h3>
+                  <h3 className="font-bold text-[20px] text-slate-800">{h.step3Title || 'Kaydedin'}</h3>
                 </div>
                 <p className="text-slate-500 text-[18px] leading-snug">
-                  {h.step3Text || '"Analiz Et" butonuna basın; sistemimiz videonun teknik detaylarını ve en yüksek kalitesini hazırlasın.'}
+                  {h.step3Text || '"Kaydet" butonuna basın; sistemimiz videonun teknik detaylarını ve en yüksek kalitesini hazırlasın.'}
                 </p>
               </div>
               <div className="flex flex-col items-center text-center gap-3">
@@ -161,10 +161,10 @@ export default async function Home({ searchParams }) {
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="step-number">4</span>
-                  <h3 className="font-bold text-[20px] text-slate-800">{h.step4Title || 'Güvenle analiz edin'}</h3>
+                  <h3 className="font-bold text-[20px] text-slate-800">{h.step4Title || 'Güvenle kaydedin'}</h3>
                 </div>
                 <p className="text-slate-500 text-[18px] leading-snug">
-                  {h.step4Text || 'Güvenle analiz edin — isterseniz ZIP olarak toplu, isterseniz videoları tek tek analiz edin.'}
+                  {h.step4Text || 'Güvenle kaydedin — isterseniz ZIP olarak toplu, isterseniz videoları tek tek kaydedin.'}
                 </p>
               </div>
             </div>
@@ -174,9 +174,9 @@ export default async function Home({ searchParams }) {
         <section className="max-w-xl mx-auto px-4 py-16 sm:py-20">
           <div className="bg-gradient-to-br from-[#1d9bf0] via-[#1a9fd4] to-emerald-500 text-white p-8 rounded-[2rem] text-center shadow-2xl border border-white/20">
             <i className="fa-brands fa-x-twitter text-4xl mb-4" aria-hidden />
-            <h2 className="text-[20px] font-black mb-3 italic">{h.historyBoxTitle || 'Analiz Arşiviniz'}</h2>
+            <h2 className="text-[20px] font-black mb-3 italic">{h.historyBoxTitle || 'Kayıt Arşiviniz'}</h2>
             <p className="text-blue-50 text-[18px] mb-8 leading-relaxed">
-              {h.historyBoxText || 'X kullanıcı girişi yapan (Kesinlikle şifrenizi istemiyoruz) kullanıcılarımızın analiz geçmişi profillerine otomatik eklenir. Arşivim sayfasından takip edebilirsiniz.'}
+              {h.historyBoxText || 'X kullanıcı girişi yapan (Kesinlikle şifrenizi istemiyoruz) kullanıcılarımızın kayıt geçmişi profillerine otomatik eklenir. Arşivim sayfasından takip edebilirsiniz.'}
             </p>
             {session?.user ? (
               <Link href={historyHref} className="bg-white text-slate-900 w-full touch-target rounded-xl font-black text-[18px] hover:bg-blue-50 transition flex items-center justify-center gap-3 min-h-[48px] inline-flex shadow-lg">

@@ -33,7 +33,7 @@ export async function generateMetadata({ searchParams }) {
   const pageTitle = layout.pages?.gecmis?.title || 'My Archive';
   return buildSeoMetadata(getBaseUrl(), {
     title: pageTitle,
-    description: 'WBS analiz arşivinizi görüntüleyin ve yönetin. Twitter/X video analiz geçmişi.',
+    description: 'WBS kayıt arşivinizi görüntüleyin ve yönetin. Twitter/X video kayıt geçmişi.',
     path: '/gecmis',
     lang,
   });

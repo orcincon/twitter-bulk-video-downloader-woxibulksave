@@ -1,9 +1,93 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
 import { formatBucketLabel } from '@/lib/visitor-stats.js';
 import ConfirmToast from '@/components/ConfirmToast.js';
+
+function compareSortValues(a, b, dir) {
+  const mul = dir === 'asc' ? 1 : -1;
+  if (a == null && b == null) return 0;
+  if (a == null) return 1 * mul;
+  if (b == null) return -1 * mul;
+  if (typeof a === 'number' && typeof b === 'number') return (a - b) * mul;
+  if (typeof a === 'boolean' && typeof b === 'boolean') {
+    if (a === b) return 0;
+    return (a ? 1 : -1) * mul;
+  }
+  const ad = Date.parse(a);
+  const bd = Date.parse(b);
+  if (!Number.isNaN(ad) && !Number.isNaN(bd)) return (ad - bd) * mul;
+  return String(a).localeCompare(String(b), 'tr', { sensitivity: 'base' }) * mul;
+}
+
+function sortRows(rows, sort, getters) {
+  const getter = getters[sort.field];
+  if (!getter) return rows;
+  return [...rows].sort((a, b) => compareSortValues(getter(a), getter(b), sort.dir));
+}
+
+function nextSortState(prev, field) {
+  if (prev.field !== field) return { field, dir: 'asc' };
+  return { field, dir: prev.dir === 'asc' ? 'desc' : 'asc' };
+}
+
+function SortableTh({ label, field, sort, onSort, className = '', align = 'left', title }) {
+  const active = sort?.field === field;
+  const arrow = !active ? '↕' : sort.dir === 'asc' ? '↑' : '↓';
+  return (
+    <th className={`${className}${align === 'right' ? ' text-right' : ''}`}>
+      <button
+        type="button"
+        onClick={() => onSort(field)}
+        title={title || `${label} — artan/azalan sırala`}
+        className={`inline-flex items-center gap-1 font-medium hover:text-gray-900 ${
+          align === 'right' ? 'ml-auto' : ''
+        } ${active ? 'text-[#1d9bf0]' : 'text-gray-600'}`}
+      >
+        <span>{label}</span>
+        <span className={`text-xs ${active ? 'text-[#1d9bf0]' : 'text-gray-400'}`} aria-hidden>
+          {arrow}
+        </span>
+      </button>
+    </th>
+  );
+}
+
+const USER_SORT_GETTERS = {
+  username: (u) => u.username || '',
+  email: (u) => u.email || '',
+  name: (u) => u.name || '',
+  preferred_language: (u) => u.preferred_language || '',
+  has_oauth_token: (u) => Boolean(u.has_oauth_token),
+  created_at: (u) => u.created_at || '',
+  updated_at: (u) => u.updated_at || '',
+};
+
+const GUEST_SORT_GETTERS = {
+  client_ip: (g) => g.client_ip || '',
+  user_agent: (g) => g.user_agent || '',
+  count: (g) => g.count ?? 0,
+  last_seen: (g) => g.last_seen || '',
+};
+
+const PAGE_SORT_GETTERS = {
+  path: (p) => p.path || '',
+  visits: (p) => p.visits ?? 0,
+  uniqueVisitors: (p) => p.uniqueVisitors ?? 0,
+};
+
+const REFERRER_SORT_GETTERS = {
+  label: (r) => r.label || '',
+  visits: (r) => r.visits ?? 0,
+  uniqueVisitors: (r) => r.uniqueVisitors ?? 0,
+};
+
+const DAILY_SORT_GETTERS = {
+  period: (r) => r.period || '',
+  uniqueVisitors: (r) => r.uniqueVisitors ?? 0,
+  totalVisits: (r) => r.totalVisits ?? 0,
+};
 
 export default function KamikazePage() {
   const [status, setStatus] = useState('loading'); // 'loading' | 'login' | 'dashboard' | 'error' | 'not_configured'
@@ -13,7 +97,18 @@ export default function KamikazePage() {
   const [submitting, setSubmitting] = useState(false);
   const [stats, setStats] = useState({ totalLogs: 0, totalUsers: 0, usersWithOAuthToken: 0, recentLogs: [] });
   const [loadingStats, setLoadingStats] = useState(true);
-  const [activeTab, setActiveTab] = useState('stats'); // 'stats' | 'users' | 'visitors'
+  const [logsUsernameFilter, setLogsUsernameFilter] = useState('');
+  const [logsUsernameFilterMode, setLogsUsernameFilterMode] = useState('include');
+  const [logsSort, setLogsSort] = useState({ field: 'created_at', dir: 'desc' });
+  const [usersSort, setUsersSort] = useState({ field: 'created_at', dir: 'desc' });
+  const [guestsSort, setGuestsSort] = useState({ field: 'last_seen', dir: 'desc' });
+  const [pagesSort, setPagesSort] = useState({ field: 'visits', dir: 'desc' });
+  const [referrersSort, setReferrersSort] = useState({ field: 'visits', dir: 'desc' });
+  const [dailySort, setDailySort] = useState({ field: 'period', dir: 'desc' });
+  const [logsPage, setLogsPage] = useState(1);
+  const [logsPagination, setLogsPagination] = useState({ page: 1, pageSize: 100, totalPages: 1, totalRecentRows: 0 });
+  const [logUsernameOptions, setLogUsernameOptions] = useState([]);
+  const [activeTab, setActiveTab] = useState('stats'); // 'stats' | 'users' | 'visitors' | 'daily'
   const [users, setUsers] = useState([]);
   const [guests, setGuests] = useState([]);
   const [loadingUsers, setLoadingUsers] = useState(false);
@@ -23,17 +118,18 @@ export default function KamikazePage() {
   const [deleting, setDeleting] = useState(false);
   const [deletingUsers, setDeletingUsers] = useState(false);
   const [deletingGuests, setDeletingGuests] = useState(false);
+  const [syncingUsernames, setSyncingUsernames] = useState(false);
+  const [usernameSyncMessage, setUsernameSyncMessage] = useState('');
   const [actionError, setActionError] = useState('');
-  const [visitorGranularity, setVisitorGranularity] = useState('day');
   const [visitorStats, setVisitorStats] = useState({
     uniqueVisitors: 0,
     totalVisits: 0,
-    breakdown: [],
-    usingAnalysisFallback: false,
+    pages: [],
+    referrers: [],
+    daily: [],
     tableReady: true,
     serviceRoleConfigured: true,
-    referrers: [],
-    recentVisits: [],
+    truncated: false,
   });
   const [loadingVisitors, setLoadingVisitors] = useState(false);
   const [confirmDialog, setConfirmDialog] = useState(null);
@@ -52,10 +148,22 @@ export default function KamikazePage() {
     closeConfirm();
   };
 
-  const loadStats = async () => {
+  const loadStats = async (page = logsPage) => {
     setLoadingStats(true);
     try {
-      const res = await fetch('/api/kamikaze/stats', { credentials: 'include' });
+      const params = new URLSearchParams({
+        page: String(page),
+        pageSize: '100',
+      });
+      const filterNorm = logsUsernameFilter.trim().replace(/^@+/, '');
+      if (filterNorm) {
+        params.set('username', filterNorm);
+        params.set('usernameMode', logsUsernameFilterMode);
+      }
+      params.set('sortBy', logsSort.field);
+      params.set('sortDir', logsSort.dir);
+
+      const res = await fetch(`/api/kamikaze/stats?${params.toString()}`, { credentials: 'include' });
       if (res.status === 401) {
         setStatus('login');
         return;
@@ -77,6 +185,14 @@ export default function KamikazePage() {
         usersWithOAuthToken: data.usersWithOAuthToken ?? 0,
         recentLogs: data.recentLogs ?? [],
       });
+      setLogsPagination({
+        page: data.page ?? page,
+        pageSize: data.pageSize ?? 100,
+        totalPages: data.totalPages ?? 1,
+        totalRecentRows: data.totalRecentRows ?? 0,
+      });
+      setLogUsernameOptions(data.usernameOptions ?? []);
+      if ((data.page ?? page) !== page) setLogsPage(data.page ?? page);
       setStatus('dashboard');
     } catch {
       setStatus('error');
@@ -86,8 +202,8 @@ export default function KamikazePage() {
   };
 
   useEffect(() => {
-    loadStats();
-  }, []);
+    if (activeTab === 'stats') loadStats(logsPage);
+  }, [activeTab, logsPage, logsUsernameFilter, logsUsernameFilterMode, logsSort]);
 
   const loadUsers = async () => {
     setLoadingUsers(true);
@@ -116,10 +232,10 @@ export default function KamikazePage() {
     if (status === 'dashboard' && activeTab === 'users') loadUsers();
   }, [status, activeTab]);
 
-  const loadVisitors = useCallback(async (granularity) => {
+  const loadVisitors = async () => {
     setLoadingVisitors(true);
     try {
-      const res = await fetch(`/api/kamikaze/visitors?granularity=${granularity}`, { credentials: 'include' });
+      const res = await fetch('/api/kamikaze/visitors', { credentials: 'include' });
       if (res.status === 401) {
         setStatus('login');
         return;
@@ -128,12 +244,12 @@ export default function KamikazePage() {
         setVisitorStats({
           uniqueVisitors: 0,
           totalVisits: 0,
-          breakdown: [],
-          usingAnalysisFallback: false,
+          pages: [],
+          referrers: [],
+          daily: [],
           tableReady: false,
           serviceRoleConfigured: true,
-          referrers: [],
-          recentVisits: [],
+          truncated: false,
         });
         return;
       }
@@ -141,32 +257,32 @@ export default function KamikazePage() {
       setVisitorStats({
         uniqueVisitors: data.uniqueVisitors ?? 0,
         totalVisits: data.totalVisits ?? 0,
-        breakdown: data.breakdown ?? [],
-        usingAnalysisFallback: Boolean(data.usingAnalysisFallback),
+        pages: data.pages ?? [],
+        referrers: data.referrers ?? [],
+        daily: data.daily ?? [],
         tableReady: data.tableReady !== false,
         serviceRoleConfigured: data.serviceRoleConfigured !== false,
-        referrers: data.referrers ?? [],
-        recentVisits: data.recentVisits ?? [],
+        truncated: Boolean(data.truncated),
       });
     } catch {
       setVisitorStats({
         uniqueVisitors: 0,
         totalVisits: 0,
-        breakdown: [],
-        usingAnalysisFallback: false,
+        pages: [],
+        referrers: [],
+        daily: [],
         tableReady: false,
         serviceRoleConfigured: true,
-        referrers: [],
-        recentVisits: [],
+        truncated: false,
       });
     } finally {
       setLoadingVisitors(false);
     }
-  }, []);
+  };
 
   useEffect(() => {
-    if (status === 'dashboard' && activeTab === 'visitors') loadVisitors(visitorGranularity);
-  }, [status, activeTab, visitorGranularity, loadVisitors]);
+    if (status === 'dashboard' && (activeTab === 'visitors' || activeTab === 'daily')) loadVisitors();
+  }, [status, activeTab]);
 
   useEffect(() => {
     setActionError('');
@@ -231,12 +347,43 @@ export default function KamikazePage() {
     });
   };
 
+  const filteredRecentLogs = stats.recentLogs;
+
+  const sortedUsers = useMemo(() => sortRows(users, usersSort, USER_SORT_GETTERS), [users, usersSort]);
+  const sortedGuests = useMemo(() => sortRows(guests, guestsSort, GUEST_SORT_GETTERS), [guests, guestsSort]);
+  const sortedPages = useMemo(
+    () => sortRows(visitorStats.pages, pagesSort, PAGE_SORT_GETTERS),
+    [visitorStats.pages, pagesSort]
+  );
+  const sortedReferrers = useMemo(
+    () => sortRows(visitorStats.referrers, referrersSort, REFERRER_SORT_GETTERS),
+    [visitorStats.referrers, referrersSort]
+  );
+  const sortedDaily = useMemo(
+    () => sortRows(visitorStats.daily ?? [], dailySort, DAILY_SORT_GETTERS),
+    [visitorStats.daily, dailySort]
+  );
+
+  const handleLogsSort = (field) => {
+    setLogsSort((prev) => nextSortState(prev, field));
+    setLogsPage(1);
+  };
+
+  const allFilteredLogsSelected =
+    filteredRecentLogs.length > 0 && filteredRecentLogs.every((r) => selectedRowIds.has(r.id));
+
   const toggleAll = () => {
-    if (selectedRowIds.size >= stats.recentLogs.length) {
-      setSelectedRowIds(new Set());
-    } else {
-      setSelectedRowIds(new Set(stats.recentLogs.map((r) => r.id)));
-    }
+    setSelectedRowIds((prev) => {
+      if (filteredRecentLogs.length === 0) return prev;
+      if (filteredRecentLogs.every((r) => prev.has(r.id))) {
+        const next = new Set(prev);
+        filteredRecentLogs.forEach((r) => next.delete(r.id));
+        return next;
+      }
+      const next = new Set(prev);
+      filteredRecentLogs.forEach((r) => next.add(r.id));
+      return next;
+    });
   };
 
   const deleteLogs = async (logIds) => {
@@ -253,7 +400,10 @@ export default function KamikazePage() {
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.ok) {
         setSelectedRowIds(new Set());
-        await loadStats();
+        const nextPage =
+          stats.recentLogs.length <= 1 && logsPage > 1 ? logsPage - 1 : logsPage;
+        if (nextPage !== logsPage) setLogsPage(nextPage);
+        else await loadStats(logsPage);
       } else {
         setActionError('Analiz silinemedi.');
       }
@@ -328,6 +478,43 @@ export default function KamikazePage() {
     openConfirm(`${userIds.length} kullanıcı ve analiz geçmişleri silinecek. Emin misiniz?`, () => deleteUsers(userIds));
   };
 
+  const handleSyncUsernames = async () => {
+    setSyncingUsernames(true);
+    setUsernameSyncMessage('');
+    setActionError('');
+    try {
+      const res = await fetch('/api/kamikaze/users/sync-usernames', {
+        method: 'POST',
+        credentials: 'include',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 401) {
+        setStatus('login');
+        return;
+      }
+      if (res.status === 400 && data.error === 'USERNAME_COLUMN_MISSING') {
+        setActionError('Önce Supabase\'de users.username kolonunu ekleyin (016_users_username.sql).');
+        return;
+      }
+      if (!res.ok || !data.ok) {
+        setActionError('X kullanıcı adları alınamadı.');
+        return;
+      }
+      if (data.saved > 0) {
+        setUsernameSyncMessage(`${data.saved} kullanıcının X kullanıcı adı güncellendi.`);
+      } else if (data.missing === 0) {
+        setUsernameSyncMessage('Tüm kullanıcıların X kullanıcı adı zaten kayıtlı.');
+      } else {
+        setUsernameSyncMessage('Eksik kullanıcı adı bulunamadı veya X API yanıt vermedi.');
+      }
+      await loadUsers();
+    } catch {
+      setActionError('Bağlantı hatası.');
+    } finally {
+      setSyncingUsernames(false);
+    }
+  };
+
   const toggleGuest = (clientIp) => toggleSetItem(setSelectedGuestIps, clientIp);
 
   const toggleAllGuests = () => {
@@ -384,6 +571,31 @@ export default function KamikazePage() {
       >
         {deletingFlag ? 'Siliniyor…' : `${label} (${selectedCount})`}
       </button>
+    );
+  };
+
+  const renderLogsPagination = () => {
+    if (logsPagination.totalPages <= 1) return null;
+    return (
+      <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
+        {Array.from({ length: logsPagination.totalPages }, (_, i) => i + 1).map((pageNum) => (
+          <button
+            key={pageNum}
+            type="button"
+            onClick={() => setLogsPage(pageNum)}
+            disabled={loadingStats}
+            className={`min-w-[2rem] px-2.5 py-1 text-sm font-medium rounded-lg border transition disabled:opacity-50 ${
+              pageNum === logsPagination.page
+                ? 'border-[#1d9bf0] bg-[#1d9bf0] text-white'
+                : 'border-gray-200 text-gray-700 hover:bg-gray-50'
+            }`}
+            aria-label={`Sayfa ${pageNum}`}
+            aria-current={pageNum === logsPagination.page ? 'page' : undefined}
+          >
+            {pageNum}
+          </button>
+        ))}
+      </div>
     );
   };
 
@@ -469,7 +681,7 @@ export default function KamikazePage() {
           <p className="text-gray-600 text-sm sm:text-base mb-6">Bir hata oluştu. Lütfen tekrar deneyin.</p>
           <button
             type="button"
-            onClick={() => { setStatus('loading'); setLoadingStats(true); loadStats(); }}
+            onClick={() => { setStatus('loading'); setLoadingStats(true); loadStats(logsPage); }}
             className="text-[#1d9bf0] hover:text-[#1d9bf0] text-sm sm:text-base font-medium"
           >
             Tekrar dene
@@ -518,6 +730,13 @@ export default function KamikazePage() {
           >
             Ziyaretçiler
           </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('daily')}
+            className={`px-3 sm:px-5 lg:px-6 py-3 sm:py-3.5 text-sm lg:text-base font-medium border-b-2 transition whitespace-nowrap ${activeTab === 'daily' ? 'border-[#1d9bf0] text-[#1d9bf0]' : 'border-transparent text-gray-600 hover:text-gray-900'}`}
+          >
+            Günlük ziyaretçi
+          </button>
         </div>
       </nav>
 
@@ -532,7 +751,33 @@ export default function KamikazePage() {
             <div className="grid grid-cols-3 gap-2 sm:gap-6 lg:gap-8 mb-4 sm:mb-8 lg:mb-10">
               <div className="bg-white rounded-lg sm:rounded-xl lg:rounded-2xl border border-[#1d9bf0]/30 shadow-md p-2 sm:p-6 lg:p-8 min-w-0">
                 <p className="text-[10px] sm:text-sm text-gray-600 mb-0.5 sm:mb-1 leading-tight">Toplam analiz</p>
-                <p className="text-lg sm:text-3xl lg:text-4xl font-bold text-gray-900 tabular-nums">{stats.totalLogs}</p>
+                <div className="flex items-center gap-2">
+                  <p className="text-lg sm:text-3xl lg:text-4xl font-bold text-gray-900 tabular-nums">{stats.totalLogs}</p>
+                  <button
+                    type="button"
+                    onClick={() => loadStats(logsPage)}
+                    disabled={loadingStats}
+                    className="inline-flex items-center gap-1 px-2 py-1 sm:px-2.5 sm:py-1.5 text-xs sm:text-sm font-medium rounded-lg border border-gray-200 text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                    aria-label="Toplam analizi yenile"
+                    title="Yenile"
+                  >
+                    <svg
+                      className={`w-3.5 h-3.5 sm:w-4 sm:h-4 ${loadingStats ? 'animate-spin' : ''}`}
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                      aria-hidden
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                      />
+                    </svg>
+                    <span className="hidden sm:inline">Yenile</span>
+                  </button>
+                </div>
               </div>
               <div className="bg-white rounded-lg sm:rounded-xl lg:rounded-2xl border border-[#1d9bf0]/30 shadow-md p-2 sm:p-6 lg:p-8 min-w-0">
                 <p className="text-[10px] sm:text-sm text-gray-600 mb-0.5 sm:mb-1 leading-tight">
@@ -557,14 +802,54 @@ export default function KamikazePage() {
                   <h2 className="text-base lg:text-lg font-bold text-gray-900">Son analizler</h2>
                   <p className="text-xs text-gray-500 mt-0.5">Her satır = bir X linki. Video = o linkten bulunan video adedi.</p>
                 </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  {stats.recentLogs.length > 0 && (
+                <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+                  {renderLogsPagination()}
+                  <label className="flex items-center gap-2 min-w-0">
+                    <span className="sr-only">Filtre modu</span>
+                    <select
+                      value={logsUsernameFilterMode}
+                      onChange={(e) => {
+                        setLogsUsernameFilterMode(e.target.value);
+                        setLogsPage(1);
+                      }}
+                      disabled={!logsUsernameFilter}
+                      className="w-[6.5rem] sm:w-28 max-w-full px-2.5 py-1.5 text-sm rounded-lg border border-gray-200 bg-white text-gray-800 focus:outline-none focus:ring-2 focus:ring-[#1d9bf0]/30 focus:border-[#1d9bf0] disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <option value="include">Göster</option>
+                      <option value="exclude">Hariç tut</option>
+                    </select>
+                  </label>
+                  <label className="flex items-center gap-2 min-w-0">
+                    <span className="sr-only">X kullanıcı adı filtre</span>
+                    <select
+                      value={logsUsernameFilter}
+                      onChange={(e) => {
+                        setLogsUsernameFilter(e.target.value);
+                        setLogsPage(1);
+                      }}
+                      className="w-[9.5rem] sm:w-44 max-w-full px-2.5 py-1.5 text-sm rounded-lg border border-gray-200 bg-white text-gray-800 focus:outline-none focus:ring-2 focus:ring-[#1d9bf0]/30 focus:border-[#1d9bf0]"
+                    >
+                      <option value="">Tümü</option>
+                      {logUsernameOptions.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <span
+                    className="text-sm font-semibold tabular-nums text-gray-700 whitespace-nowrap"
+                    title="Filtreye uyan / tüm analizler"
+                  >
+                    {logsPagination.totalRecentRows}/{stats.totalLogs}
+                  </span>
+                  {filteredRecentLogs.length > 0 && (
                     <button
                       type="button"
                       onClick={toggleAll}
                       className="px-3 py-1.5 text-sm font-medium rounded-lg border border-gray-200 text-gray-700 hover:bg-gray-50"
                     >
-                      {selectedRowIds.size >= stats.recentLogs.length ? 'Seçimi kaldır' : 'Tümünü seç'}
+                      {allFilteredLogsSelected ? 'Seçimi kaldır' : 'Tümünü seç'}
                     </button>
                   )}
                   {renderBulkActions(selectedRowIds.size, handleBulkDelete, deleting, 'Seçilenleri sil')}
@@ -577,17 +862,42 @@ export default function KamikazePage() {
                       <th className="px-2 sm:px-3 py-2 sm:py-3 w-10">
                         <input
                           type="checkbox"
-                          checked={stats.recentLogs.length > 0 && selectedRowIds.size >= stats.recentLogs.length}
+                          checked={allFilteredLogsSelected}
                           onChange={toggleAll}
                           className="rounded border-gray-300"
                           aria-label="Tümünü seç"
                         />
                       </th>
                       <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium">Önizleme</th>
-                      <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium">Ad</th>
-                      <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium">Tarih</th>
-                      <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium">Video linki</th>
-                      <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium" title="Bu linkten bulunan video adedi">Video</th>
+                      <SortableTh
+                        label="X"
+                        field="user"
+                        sort={logsSort}
+                        onSort={handleLogsSort}
+                        className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3"
+                      />
+                      <SortableTh
+                        label="Tarih"
+                        field="created_at"
+                        sort={logsSort}
+                        onSort={handleLogsSort}
+                        className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3"
+                      />
+                      <SortableTh
+                        label="Video linki"
+                        field="url"
+                        sort={logsSort}
+                        onSort={handleLogsSort}
+                        className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3"
+                      />
+                      <SortableTh
+                        label="Video"
+                        field="video_count"
+                        sort={logsSort}
+                        onSort={handleLogsSort}
+                        className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3"
+                        title="Bu linkten bulunan video adedi"
+                      />
                       <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium w-12">Sil</th>
                     </tr>
                   </thead>
@@ -596,8 +906,16 @@ export default function KamikazePage() {
                       <tr>
                         <td colSpan={7} className="px-4 lg:px-8 py-12 text-center text-gray-500">Henüz kayıt yok.</td>
                       </tr>
+                    ) : filteredRecentLogs.length === 0 ? (
+                      <tr>
+                        <td colSpan={7} className="px-4 lg:px-8 py-12 text-center text-gray-500">
+                          {logsUsernameFilterMode === 'exclude'
+                            ? 'Hariç tutulan kullanıcı dışında kayıt bulunamadı.'
+                            : 'Bu kullanıcı adına ait kayıt bulunamadı.'}
+                        </td>
+                      </tr>
                     ) : (
-                      stats.recentLogs.map((row) => (
+                      filteredRecentLogs.map((row) => (
                         <tr key={row.id} className="border-t border-gray-100 hover:bg-gray-50/50">
                           <td className="px-2 sm:px-3 py-2 sm:py-3 align-middle">
                             <input
@@ -615,12 +933,37 @@ export default function KamikazePage() {
                               <span className="w-12 h-12 sm:w-14 sm:h-14 lg:w-16 lg:h-16 rounded-lg bg-gray-200 flex items-center justify-center text-gray-400 text-xs shrink-0">—</span>
                             )}
                           </td>
-                          <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 text-xs truncate max-w-[90px] sm:max-w-[160px] align-middle" title={row.user_name}>{row.user_name}</td>
+                          <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 text-xs truncate max-w-[90px] sm:max-w-[160px] align-middle">
+                            {row.user_username ? (
+                              <a
+                                href={`https://x.com/${encodeURIComponent(row.user_username)}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-[#1d9bf0] hover:underline"
+                                title={row.user_name}
+                              >
+                                {row.user_name}
+                              </a>
+                            ) : (
+                              <span title={row.user_name}>{row.user_name}</span>
+                            )}
+                          </td>
                           <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 whitespace-nowrap align-middle">{formatDate(row.created_at)}</td>
-                          <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 max-w-[140px] sm:max-w-[200px] lg:max-w-[280px] align-middle">
+                          <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 max-w-[140px] sm:max-w-none align-middle">
                             {row.url ? (
-                              <a href={row.url} target="_blank" rel="noopener noreferrer" className="text-[#1d9bf0] hover:text-[#1d9bf0] truncate block font-mono text-xs sm:text-sm" title={row.url}>
-                                {(row.url.replace(/^https?:\/\//, '').length > 40 ? row.url.replace(/^https?:\/\//, '').slice(0, 37) + '…' : row.url.replace(/^https?:\/\//, ''))}
+                              <a
+                                href={row.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-[#1d9bf0] hover:text-[#1d9bf0] font-mono text-xs sm:text-sm block truncate sm:truncate-none sm:break-all sm:whitespace-normal"
+                                title={row.url}
+                              >
+                                <span className="sm:hidden">
+                                  {row.url.replace(/^https?:\/\//, '').length > 40
+                                    ? `${row.url.replace(/^https?:\/\//, '').slice(0, 37)}…`
+                                    : row.url.replace(/^https?:\/\//, '')}
+                                </span>
+                                <span className="hidden sm:inline">{row.url}</span>
                               </a>
                             ) : (
                               <span className="text-gray-400">—</span>
@@ -645,16 +988,35 @@ export default function KamikazePage() {
                   </tbody>
                 </table>
               </div>
+              {logsPagination.totalPages > 1 && (
+                <div className="px-4 sm:px-6 lg:px-8 py-3 sm:py-4 border-t border-gray-100 flex flex-wrap items-center justify-center">
+                  {renderLogsPagination()}
+                </div>
+              )}
             </div>
           </>
         )}
 
         {activeTab === 'users' && (
           <div className="space-y-6 lg:space-y-8">
+            {usernameSyncMessage && (
+              <p className="text-sm text-green-700 bg-green-50 border border-green-200 rounded-lg px-4 py-2">{usernameSyncMessage}</p>
+            )}
             <div className="bg-white rounded-xl lg:rounded-2xl border border-[#1d9bf0]/30 shadow-md overflow-hidden">
               <div className="px-4 sm:px-6 lg:px-8 py-3 sm:py-4 border-b border-gray-100 flex flex-wrap items-center justify-between gap-2">
-                <h2 className="text-base lg:text-lg font-bold text-gray-900">Kayıtlı kullanıcılar</h2>
+                <h2 className="text-base lg:text-lg font-bold text-gray-900">
+                  Kayıtlı kullanıcılar
+                  <span className="text-gray-500 font-semibold tabular-nums ml-1.5">({users.length})</span>
+                </h2>
                 <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleSyncUsernames}
+                    disabled={syncingUsernames || loadingUsers}
+                    className="px-3 py-1.5 text-sm font-medium rounded-lg border border-[#1d9bf0]/40 text-[#1d9bf0] hover:bg-[#1d9bf0]/5 disabled:opacity-50"
+                  >
+                    {syncingUsernames ? 'X adları çekiliyor...' : 'X kullanıcı adlarını çek'}
+                  </button>
                   {users.length > 0 && !loadingUsers && (
                     <button
                       type="button"
@@ -671,7 +1033,7 @@ export default function KamikazePage() {
                 <div className="px-4 lg:px-8 py-12 text-center text-gray-500 text-sm sm:text-base">Yükleniyor...</div>
               ) : (
                 <div className="overflow-x-auto">
-                  <table className="w-full text-sm lg:text-base min-w-[640px]">
+                  <table className="w-full text-sm lg:text-base min-w-[1080px] table-auto">
                     <thead>
                       <tr className="bg-gray-50 text-left text-gray-600">
                         <th className="px-2 sm:px-3 py-2 sm:py-3 w-10">
@@ -683,25 +1045,68 @@ export default function KamikazePage() {
                             aria-label="Tüm kullanıcıları seç"
                           />
                         </th>
-                        <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium">Profil</th>
-                        <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium">E-posta</th>
-                        <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium hidden lg:table-cell">Ad</th>
-                        <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium hidden md:table-cell">Dil</th>
-                        <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium hidden md:table-cell">OAuth</th>
-                        <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium">Kayıt</th>
-                        <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium hidden xl:table-cell">Güncelleme</th>
+                        <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium w-16">Profil</th>
+                      <SortableTh
+                        label="X"
+                        field="username"
+                        sort={usersSort}
+                        onSort={(field) => setUsersSort((prev) => nextSortState(prev, field))}
+                        className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 min-w-[120px]"
+                      />
+                      <SortableTh
+                        label="E-posta"
+                        field="email"
+                        sort={usersSort}
+                        onSort={(field) => setUsersSort((prev) => nextSortState(prev, field))}
+                        className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 min-w-[220px]"
+                      />
+                      <SortableTh
+                        label="Ad"
+                        field="name"
+                        sort={usersSort}
+                        onSort={(field) => setUsersSort((prev) => nextSortState(prev, field))}
+                        className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 min-w-[140px]"
+                      />
+                      <SortableTh
+                        label="Dil"
+                        field="preferred_language"
+                        sort={usersSort}
+                        onSort={(field) => setUsersSort((prev) => nextSortState(prev, field))}
+                        className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 w-16"
+                      />
+                      <SortableTh
+                        label="OAuth"
+                        field="has_oauth_token"
+                        sort={usersSort}
+                        onSort={(field) => setUsersSort((prev) => nextSortState(prev, field))}
+                        className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 w-20"
+                      />
+                      <SortableTh
+                        label="Kayıt"
+                        field="created_at"
+                        sort={usersSort}
+                        onSort={(field) => setUsersSort((prev) => nextSortState(prev, field))}
+                        className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 whitespace-nowrap"
+                      />
+                      <SortableTh
+                        label="Güncelleme"
+                        field="updated_at"
+                        sort={usersSort}
+                        onSort={(field) => setUsersSort((prev) => nextSortState(prev, field))}
+                        className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 whitespace-nowrap"
+                      />
                         <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium w-12">Sil</th>
                       </tr>
                     </thead>
                     <tbody>
                       {users.length === 0 ? (
                         <tr>
-                          <td colSpan={9} className="px-4 lg:px-8 py-12 text-center text-gray-500">Kayıtlı kullanıcı yok.</td>
+                          <td colSpan={10} className="px-4 lg:px-8 py-12 text-center text-gray-500">Kayıtlı kullanıcı yok.</td>
                         </tr>
                       ) : (
-                        users.map((u) => (
+                        sortedUsers.map((u) => (
                           <tr key={u.id} className="border-t border-gray-100 hover:bg-gray-50/50">
-                            <td className="px-2 sm:px-3 py-2 sm:py-3 align-middle">
+                            <td className="px-2 sm:px-3 py-2 sm:py-3 align-top">
                               <input
                                 type="checkbox"
                                 checked={selectedUserIds.has(u.id)}
@@ -710,20 +1115,34 @@ export default function KamikazePage() {
                                 aria-label="Kullanıcıyı seç"
                               />
                             </td>
-                            <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 align-middle">
+                            <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 align-top">
                               {u.image ? (
                                 <img src={u.image} alt="" className="w-8 h-8 sm:w-9 sm:h-9 lg:w-10 lg:h-10 rounded-full object-cover shrink-0" />
                               ) : (
                                 <span className="w-8 h-8 sm:w-9 sm:h-9 lg:w-10 lg:h-10 rounded-full bg-gray-200 flex items-center justify-center text-gray-500 text-xs shrink-0">?</span>
                               )}
                             </td>
-                            <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 truncate max-w-[120px] sm:max-w-[180px] align-middle">{u.email ?? '—'}</td>
-                            <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 truncate max-w-[100px] align-middle hidden lg:table-cell">{u.name ?? '—'}</td>
-                            <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 align-middle hidden md:table-cell">{u.preferred_language ?? '—'}</td>
-                            <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 align-middle hidden md:table-cell">{u.has_oauth_token ? 'Var' : 'Yok'}</td>
-                            <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 whitespace-nowrap align-middle">{formatDate(u.created_at)}</td>
-                            <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 whitespace-nowrap align-middle hidden xl:table-cell">{formatDate(u.updated_at)}</td>
-                            <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 align-middle">
+                            <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 align-top whitespace-normal break-words">
+                              {u.username ? (
+                                <a
+                                  href={`https://x.com/${encodeURIComponent(u.username)}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-[#1d9bf0] hover:underline break-all"
+                                >
+                                  @{u.username}
+                                </a>
+                              ) : (
+                                '—'
+                              )}
+                            </td>
+                            <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 align-top whitespace-normal break-all">{u.email ?? '—'}</td>
+                            <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 align-top whitespace-normal break-words">{u.name ?? '—'}</td>
+                            <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 align-top">{u.preferred_language ?? '—'}</td>
+                            <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 align-top">{u.has_oauth_token ? 'Var' : 'Yok'}</td>
+                            <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 whitespace-nowrap align-top">{formatDate(u.created_at)}</td>
+                            <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 whitespace-nowrap align-top">{formatDate(u.updated_at)}</td>
+                            <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 align-top">
                               <button
                                 type="button"
                                 onClick={() => handleDeleteUser(u)}
@@ -779,10 +1198,34 @@ export default function KamikazePage() {
                             aria-label="Tüm misafirleri seç"
                           />
                         </th>
-                        <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium">IP adresi</th>
-                        <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium hidden sm:table-cell">User-Agent</th>
-                        <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium w-24">Analiz</th>
-                        <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium">Son görülme</th>
+                        <SortableTh
+                          label="IP adresi"
+                          field="client_ip"
+                          sort={guestsSort}
+                          onSort={(field) => setGuestsSort((prev) => nextSortState(prev, field))}
+                          className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3"
+                        />
+                        <SortableTh
+                          label="User-Agent"
+                          field="user_agent"
+                          sort={guestsSort}
+                          onSort={(field) => setGuestsSort((prev) => nextSortState(prev, field))}
+                          className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 hidden sm:table-cell"
+                        />
+                        <SortableTh
+                          label="Analiz"
+                          field="count"
+                          sort={guestsSort}
+                          onSort={(field) => setGuestsSort((prev) => nextSortState(prev, field))}
+                          className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 w-24"
+                        />
+                        <SortableTh
+                          label="Son görülme"
+                          field="last_seen"
+                          sort={guestsSort}
+                          onSort={(field) => setGuestsSort((prev) => nextSortState(prev, field))}
+                          className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3"
+                        />
                         <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium w-12">Sil</th>
                       </tr>
                     </thead>
@@ -792,7 +1235,7 @@ export default function KamikazePage() {
                           <td colSpan={6} className="px-4 lg:px-8 py-12 text-center text-gray-500">Misafir kaydı yok veya IP bilgisi alınamadı.</td>
                         </tr>
                       ) : (
-                        guests.map((g, i) => (
+                        sortedGuests.map((g, i) => (
                           <tr key={`guest-${g.client_ip}-${i}`} className="border-t border-gray-100 hover:bg-gray-50/50">
                             <td className="px-2 sm:px-3 py-2 sm:py-3 align-middle">
                               <input
@@ -832,121 +1275,86 @@ export default function KamikazePage() {
 
         {activeTab === 'visitors' && (
           <div className="space-y-4 sm:space-y-6">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="inline-flex rounded-lg border border-[#1d9bf0]/30 bg-white p-1 shadow-sm">
-                <button
-                  type="button"
-                  onClick={() => setVisitorGranularity('day')}
-                  className={`px-3 sm:px-4 py-1.5 text-sm font-medium rounded-md transition ${visitorGranularity === 'day' ? 'bg-[#1d9bf0] text-white' : 'text-gray-600 hover:text-gray-900'}`}
-                >
-                  Günlük
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setVisitorGranularity('week')}
-                  className={`px-3 sm:px-4 py-1.5 text-sm font-medium rounded-md transition ${visitorGranularity === 'week' ? 'bg-[#1d9bf0] text-white' : 'text-gray-600 hover:text-gray-900'}`}
-                >
-                  Haftalık
-                </button>
-              </div>
-              <p className="text-xs text-gray-500">
-                {visitorGranularity === 'day' ? 'Son 14 gün' : 'Son 8 hafta'}
-                {visitorStats.usingAnalysisFallback ? ' · Analiz kayıtlarından (geçmiş)' : ''}
-                {visitorStats.tableReady === false ? ' · site_visits tablosu yok — migration 013/014 çalıştırın' : ''}
-              </p>
-            </div>
-
             {!visitorStats.tableReady && (
               <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-                Ziyaret kaydı için Supabase&apos;de <code className="bg-amber-100 px-1 rounded">013_site_visits.sql</code> ve{' '}
-                <code className="bg-amber-100 px-1 rounded">014_site_visits_referrer_rls.sql</code> dosyalarını çalıştırın.
-                Ana sayfa ve diğer sayfalar sayılır. <code className="bg-amber-100 px-1 rounded">/kamikaze</code> ve Kamikaze oturumunuz açıkken yapılan ziyaretler sayılmaz.
+                Ziyaret kaydı için Supabase&apos;de <code className="bg-amber-100 px-1 rounded">013_site_visits.sql</code> migration&apos;ını çalıştırın.
               </div>
             )}
-
             {visitorStats.serviceRoleConfigured === false && (
               <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">
                 Vercel ortam değişkenlerine <code className="bg-red-100 px-1 rounded">SUPABASE_SERVICE_ROLE_KEY</code> ekleyin.
-                RLS açıkken anon key ile ziyaret kaydı yazılamaz; tüm sayılar sıfır kalır.
+                RLS açıkken anon key ile ziyaret verisi okunamaz.
+              </div>
+            )}
+            {visitorStats.truncated && (
+              <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                Çok fazla kayıt var; ilk 50.000 ziyaret gösteriliyor.
               </div>
             )}
 
             <div className="grid grid-cols-2 gap-2 sm:gap-6 max-w-xl">
               <div className="bg-white rounded-lg sm:rounded-xl border border-[#1d9bf0]/30 shadow-md p-2 sm:p-6 min-w-0">
                 <p className="text-[10px] sm:text-sm text-gray-600 mb-0.5 sm:mb-1 leading-tight">Tekil ziyaretçi</p>
-                <p className="text-lg sm:text-3xl font-bold text-gray-900 tabular-nums">{loadingVisitors ? '…' : visitorStats.uniqueVisitors}</p>
+                <p className="text-lg sm:text-3xl font-bold text-gray-900 tabular-nums">
+                  {loadingVisitors ? '…' : visitorStats.uniqueVisitors}
+                </p>
               </div>
               <div className="bg-white rounded-lg sm:rounded-xl border border-[#1d9bf0]/30 shadow-md p-2 sm:p-6 min-w-0">
                 <p className="text-[10px] sm:text-sm text-gray-600 mb-0.5 sm:mb-1 leading-tight">Toplam ziyaret</p>
-                <p className="text-lg sm:text-3xl font-bold text-gray-900 tabular-nums">{loadingVisitors ? '…' : visitorStats.totalVisits}</p>
+                <p className="text-lg sm:text-3xl font-bold text-gray-900 tabular-nums">
+                  {loadingVisitors ? '…' : visitorStats.totalVisits}
+                </p>
               </div>
-            </div>
-
-            <div className="bg-white rounded-xl lg:rounded-2xl border border-[#1d9bf0]/30 shadow-md overflow-hidden">
-              <h2 className="text-base lg:text-lg font-bold text-gray-900 px-4 sm:px-6 lg:px-8 py-3 sm:py-4 border-b border-gray-100">
-                {visitorGranularity === 'day' ? 'Günlük dağılım' : 'Haftalık dağılım'}
-              </h2>
-              {loadingVisitors ? (
-                <div className="px-4 lg:px-8 py-12 text-center text-gray-500 text-sm">Yükleniyor...</div>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm lg:text-base min-w-[320px]">
-                    <thead>
-                      <tr className="bg-gray-50 text-left text-gray-600">
-                        <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium">{visitorGranularity === 'day' ? 'Gün' : 'Hafta'}</th>
-                        <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium w-28">Tekil</th>
-                        <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium w-28">Toplam</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {visitorStats.breakdown.length === 0 ? (
-                        <tr>
-                          <td colSpan={3} className="px-4 lg:px-8 py-12 text-center text-gray-500">Henüz ziyaret verisi yok.</td>
-                        </tr>
-                      ) : (
-                        visitorStats.breakdown.map((row) => (
-                          <tr key={row.period} className="border-t border-gray-100 hover:bg-gray-50/50">
-                            <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 whitespace-nowrap">{formatBucketLabel(row.period, visitorGranularity)}</td>
-                            <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-900 font-semibold tabular-nums">{row.uniqueVisitors}</td>
-                            <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-900 font-semibold tabular-nums">{row.totalVisits}</td>
-                          </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              )}
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
               <div className="bg-white rounded-xl lg:rounded-2xl border border-[#1d9bf0]/30 shadow-md overflow-hidden">
-                <h2 className="text-base lg:text-lg font-bold text-gray-900 px-4 sm:px-6 lg:px-8 py-3 sm:py-4 border-b border-gray-100">Referans kaynakları</h2>
+                <div className="px-4 sm:px-6 lg:px-8 py-3 sm:py-4 border-b border-gray-100 flex items-center justify-between gap-2">
+                  <h2 className="text-base lg:text-lg font-bold text-gray-900">Ziyaret edilen sayfalar</h2>
+                  <span className="text-xs text-gray-500 tabular-nums">{visitorStats.pages.length} sayfa</span>
+                </div>
                 {loadingVisitors ? (
                   <div className="px-4 py-10 text-center text-gray-500 text-sm">Yükleniyor...</div>
-                ) : visitorStats.referrers.length === 0 ? (
-                  <div className="px-4 py-10 text-center text-gray-500 text-sm">Henüz referans verisi yok.</div>
+                ) : visitorStats.pages.length === 0 ? (
+                  <div className="px-4 py-10 text-center text-gray-500 text-sm">Henüz sayfa ziyareti yok.</div>
                 ) : (
-                  <div className="overflow-x-auto">
+                  <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
                     <table className="w-full text-sm min-w-[280px]">
-                      <thead>
-                        <tr className="bg-gray-50 text-left text-gray-600">
-                          <th className="px-3 sm:px-4 py-2 font-medium">Kaynak</th>
-                          <th className="px-3 sm:px-4 py-2 font-medium w-20 text-right">Ziyaret</th>
+                      <thead className="sticky top-0 bg-gray-50">
+                        <tr className="text-left text-gray-600">
+                          <SortableTh
+                            label="Sayfa"
+                            field="path"
+                            sort={pagesSort}
+                            onSort={(field) => setPagesSort((prev) => nextSortState(prev, field))}
+                            className="px-3 sm:px-4 py-2"
+                          />
+                          <SortableTh
+                            label="Ziyaret"
+                            field="visits"
+                            sort={pagesSort}
+                            onSort={(field) => setPagesSort((prev) => nextSortState(prev, field))}
+                            className="px-3 sm:px-4 py-2 w-20"
+                            align="right"
+                          />
+                          <SortableTh
+                            label="Tekil"
+                            field="uniqueVisitors"
+                            sort={pagesSort}
+                            onSort={(field) => setPagesSort((prev) => nextSortState(prev, field))}
+                            className="px-3 sm:px-4 py-2 w-20"
+                            align="right"
+                          />
                         </tr>
                       </thead>
                       <tbody>
-                        {visitorStats.referrers.map((ref) => (
-                          <tr key={ref.label} className="border-t border-gray-100">
-                            <td className="px-3 sm:px-4 py-2 text-gray-700">
-                              {ref.referrer ? (
-                                <a href={ref.referrer} target="_blank" rel="noopener noreferrer" className="text-[#1d9bf0] hover:underline truncate block max-w-[240px]" title={ref.referrer}>
-                                  {ref.label}
-                                </a>
-                              ) : (
-                                <span>{ref.label}</span>
-                              )}
+                        {sortedPages.map((page) => (
+                          <tr key={page.path} className="border-t border-gray-100 hover:bg-gray-50/50">
+                            <td className="px-3 sm:px-4 py-2 text-gray-800 font-mono text-xs truncate max-w-[220px]" title={page.path}>
+                              {page.path}
                             </td>
-                            <td className="px-3 sm:px-4 py-2 text-gray-900 font-semibold text-right tabular-nums">{ref.count}</td>
+                            <td className="px-3 sm:px-4 py-2 text-gray-900 font-semibold text-right tabular-nums">{page.visits}</td>
+                            <td className="px-3 sm:px-4 py-2 text-gray-700 text-right tabular-nums">{page.uniqueVisitors}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -956,35 +1364,64 @@ export default function KamikazePage() {
               </div>
 
               <div className="bg-white rounded-xl lg:rounded-2xl border border-[#1d9bf0]/30 shadow-md overflow-hidden">
-                <h2 className="text-base lg:text-lg font-bold text-gray-900 px-4 sm:px-6 lg:px-8 py-3 sm:py-4 border-b border-gray-100">Son ziyaretler</h2>
+                <div className="px-4 sm:px-6 lg:px-8 py-3 sm:py-4 border-b border-gray-100 flex items-center justify-between gap-2">
+                  <h2 className="text-base lg:text-lg font-bold text-gray-900">Referans siteler</h2>
+                  <span className="text-xs text-gray-500 tabular-nums">{visitorStats.referrers.length} kaynak</span>
+                </div>
                 {loadingVisitors ? (
                   <div className="px-4 py-10 text-center text-gray-500 text-sm">Yükleniyor...</div>
-                ) : visitorStats.recentVisits.length === 0 ? (
-                  <div className="px-4 py-10 text-center text-gray-500 text-sm">Henüz ziyaret kaydı yok.</div>
+                ) : visitorStats.referrers.length === 0 ? (
+                  <div className="px-4 py-10 text-center text-gray-500 text-sm">Henüz referans verisi yok.</div>
                 ) : (
-                  <div className="overflow-x-auto max-h-[360px] overflow-y-auto">
-                    <table className="w-full text-sm min-w-[320px]">
+                  <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
+                    <table className="w-full text-sm min-w-[280px]">
                       <thead className="sticky top-0 bg-gray-50">
                         <tr className="text-left text-gray-600">
-                          <th className="px-3 sm:px-4 py-2 font-medium">Tarih</th>
-                          <th className="px-3 sm:px-4 py-2 font-medium">Sayfa</th>
-                          <th className="px-3 sm:px-4 py-2 font-medium">Referans</th>
+                          <SortableTh
+                            label="Kaynak"
+                            field="label"
+                            sort={referrersSort}
+                            onSort={(field) => setReferrersSort((prev) => nextSortState(prev, field))}
+                            className="px-3 sm:px-4 py-2"
+                          />
+                          <SortableTh
+                            label="Ziyaret"
+                            field="visits"
+                            sort={referrersSort}
+                            onSort={(field) => setReferrersSort((prev) => nextSortState(prev, field))}
+                            className="px-3 sm:px-4 py-2 w-20"
+                            align="right"
+                          />
+                          <SortableTh
+                            label="Tekil"
+                            field="uniqueVisitors"
+                            sort={referrersSort}
+                            onSort={(field) => setReferrersSort((prev) => nextSortState(prev, field))}
+                            className="px-3 sm:px-4 py-2 w-20"
+                            align="right"
+                          />
                         </tr>
                       </thead>
                       <tbody>
-                        {visitorStats.recentVisits.map((v, i) => (
-                          <tr key={`${v.created_at}-${i}`} className="border-t border-gray-100">
-                            <td className="px-3 sm:px-4 py-2 text-gray-600 whitespace-nowrap text-xs">{formatDate(v.created_at)}</td>
-                            <td className="px-3 sm:px-4 py-2 text-gray-700 font-mono text-xs truncate max-w-[100px]" title={v.path}>{v.path}</td>
-                            <td className="px-3 sm:px-4 py-2 text-gray-700 text-xs truncate max-w-[140px]" title={v.referrer || ''}>
-                              {v.referrer ? (
-                                <a href={v.referrer} target="_blank" rel="noopener noreferrer" className="text-[#1d9bf0] hover:underline">
-                                  {v.referrerLabel}
+                        {sortedReferrers.map((ref) => (
+                          <tr key={`${ref.label}-${ref.referrer || 'direct'}`} className="border-t border-gray-100 hover:bg-gray-50/50">
+                            <td className="px-3 sm:px-4 py-2 text-gray-700">
+                              {ref.referrer ? (
+                                <a
+                                  href={ref.referrer}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-[#1d9bf0] hover:underline truncate block max-w-[240px]"
+                                  title={ref.referrer}
+                                >
+                                  {ref.label}
                                 </a>
                               ) : (
-                                v.referrerLabel
+                                <span>{ref.label}</span>
                               )}
                             </td>
+                            <td className="px-3 sm:px-4 py-2 text-gray-900 font-semibold text-right tabular-nums">{ref.visits}</td>
+                            <td className="px-3 sm:px-4 py-2 text-gray-700 text-right tabular-nums">{ref.uniqueVisitors}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -995,6 +1432,85 @@ export default function KamikazePage() {
             </div>
           </div>
         )}
+
+        {activeTab === 'daily' && (
+          <div className="space-y-4 sm:space-y-6">
+            {!visitorStats.tableReady && (
+              <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                Ziyaret kaydı için Supabase&apos;de <code className="bg-amber-100 px-1 rounded">013_site_visits.sql</code> migration&apos;ını çalıştırın.
+              </div>
+            )}
+            {visitorStats.serviceRoleConfigured === false && (
+              <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">
+                Vercel ortam değişkenlerine <code className="bg-red-100 px-1 rounded">SUPABASE_SERVICE_ROLE_KEY</code> ekleyin.
+                RLS açıkken anon key ile ziyaret verisi okunamaz.
+              </div>
+            )}
+
+            <div className="bg-white rounded-xl lg:rounded-2xl border border-[#1d9bf0]/30 shadow-md overflow-hidden">
+              <div className="px-4 sm:px-6 lg:px-8 py-3 sm:py-4 border-b border-gray-100 flex items-center justify-between gap-2">
+                <h2 className="text-base lg:text-lg font-bold text-gray-900">Günlük ziyaretçi</h2>
+                <span className="text-xs text-gray-500">Son 15 gün</span>
+              </div>
+              {loadingVisitors ? (
+                <div className="px-4 py-10 text-center text-gray-500 text-sm">Yükleniyor...</div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm min-w-[280px]">
+                    <thead>
+                      <tr className="bg-gray-50 text-left text-gray-600">
+                        <SortableTh
+                          label="Gün"
+                          field="period"
+                          sort={dailySort}
+                          onSort={(field) => setDailySort((prev) => nextSortState(prev, field))}
+                          className="px-3 sm:px-4 py-2"
+                        />
+                        <SortableTh
+                          label="Tekil"
+                          field="uniqueVisitors"
+                          sort={dailySort}
+                          onSort={(field) => setDailySort((prev) => nextSortState(prev, field))}
+                          className="px-3 sm:px-4 py-2 w-24"
+                          align="right"
+                        />
+                        <SortableTh
+                          label="Toplam"
+                          field="totalVisits"
+                          sort={dailySort}
+                          onSort={(field) => setDailySort((prev) => nextSortState(prev, field))}
+                          className="px-3 sm:px-4 py-2 w-24"
+                          align="right"
+                        />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(visitorStats.daily ?? []).length === 0 ? (
+                        <tr>
+                          <td colSpan={3} className="px-4 py-10 text-center text-gray-500">Henüz günlük veri yok.</td>
+                        </tr>
+                      ) : (
+                        sortedDaily.map((row) => (
+                          <tr
+                            key={row.period}
+                            className={`border-t border-gray-100 hover:bg-gray-50/50 ${row.totalVisits === 0 ? 'text-gray-400' : ''}`}
+                          >
+                            <td className="px-3 sm:px-4 py-2 whitespace-nowrap text-gray-800">
+                              {formatBucketLabel(row.period, 'day')}
+                            </td>
+                            <td className="px-3 sm:px-4 py-2 font-semibold tabular-nums text-right">{row.uniqueVisitors}</td>
+                            <td className="px-3 sm:px-4 py-2 font-semibold tabular-nums text-right">{row.totalVisits}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
       </main>
       <ConfirmToast
         open={Boolean(confirmDialog)}

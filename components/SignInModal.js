@@ -5,16 +5,16 @@ import { signIn } from 'next-auth/react';
 
 const MODAL_TEXT = {
   default: {
-    tr: 'Misafir olarak tek tek 3 gönderi linki analiz edebilirsiniz. Daha fazlası ve arşiv için lütfen X kullanıcı girişi yapınız.',
-    en: 'As a guest you can analyze 3 post links one at a time. For more and to save your archive, please sign in with X.',
-    de: 'Als Gast können Sie 3 Beitragslinks einzeln analysieren. Für mehr und Ihren Archivverlauf melden Sie sich bitte mit X an.',
-    es: 'Como invitado puede analizar 3 enlaces de publicaciones uno a uno. Para más y su archivo, inicie sesión con X.',
+    tr: 'Misafir olarak tek tek 3 gönderi linki kaydedebilirsiniz. Daha fazlası ve arşiv için lütfen X kullanıcı girişi yapınız.',
+    en: 'As a guest you can save 3 post links one at a time. For more and to save your archive, please sign in with X.',
+    de: 'Als Gast können Sie 3 Beitragslinks einzeln speichern. Für mehr und Ihren Archivverlauf melden Sie sich bitte mit X an.',
+    es: 'Como invitado puede guardar 3 enlaces de publicaciones uno a uno. Para más y su archivo, inicie sesión con X.',
   },
   multi: {
-    tr: 'Çoklu link analizi ve toplu indirme için X kullanıcı girişi yapmanız gerekiyor.',
-    en: 'To analyze or download multiple links, please sign in with your X account.',
-    de: 'Für Mehrfach-Analyse und Sammeldownload melden Sie sich bitte mit Ihrem X-Konto an.',
-    es: 'Para analizar o descargar varios enlaces, inicie sesión con su cuenta de X.',
+    tr: 'Çoklu link kaydı ve toplu indirme için X kullanıcı girişi yapmanız gerekiyor.',
+    en: 'To save or download multiple links, please sign in with your X account.',
+    de: 'Für Mehrfach-Speichern und Sammeldownload melden Sie sich bitte mit Ihrem X-Konto an.',
+    es: 'Para guardar o descargar varios enlaces, inicie sesión con su cuenta de X.',
   },
 };
 

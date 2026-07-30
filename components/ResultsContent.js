@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import SignInToast from './SignInToast.js';
 import { buildDownloadFileName, buildZipFileName } from '@/lib/download-filename.js';
+import { downloadMediaInBrowser, fetchMediaBlob, handleMediaDownloadClick } from '@/lib/client-download.js';
 import {
   clearGuestDownloadCount,
   isGuestLimitReached,
@@ -202,11 +203,11 @@ export default function ResultsContent({
           const v = allVideos[i];
           const ext = v.mediaType === 'photo' ? (v.ext || 'jpg') : 'mp4';
           const fname = buildDownloadFileName(ext);
-          const proxyUrl = `${window.location.origin}/api/download/file?url=${encodeURIComponent(v.url)}&filename=${encodeURIComponent(fname)}`;
-          const res = await fetch(proxyUrl);
-          if (res.ok) {
-            const blob = await res.blob();
+          try {
+            const blob = await fetchMediaBlob(v.url, fname, window.location.origin);
             zip.file(fname, blob);
+          } catch {
+            /* skip failed file */
           }
         }
         const zipBlob = await zip.generateAsync({ type: 'blob' });
@@ -223,8 +224,7 @@ export default function ResultsContent({
         const v = allVideos[i];
         const ext = v.mediaType === 'photo' ? (v.ext || 'jpg') : 'mp4';
         const fname = buildDownloadFileName(ext);
-        const proxyUrl = `${window.location.origin}/api/download/file?url=${encodeURIComponent(v.url)}&filename=${encodeURIComponent(fname)}`;
-        window.open(proxyUrl, '_blank', 'noopener');
+        await downloadMediaInBrowser(v.url, fname, window.location.origin);
         if (i < allVideos.length - 1) await new Promise((r) => setTimeout(r, 800));
       }
     }
@@ -337,7 +337,6 @@ export default function ResultsContent({
                 const label = v.label || v.quality || '';
                 const ext = v.mediaType === 'photo' ? (v.ext || 'jpg') : 'mp4';
                 const fname = buildDownloadFileName(ext);
-                const proxyUrl = hasUrl ? `/api/download/file?url=${encodeURIComponent(v.url)}&filename=${encodeURIComponent(fname)}` : '#';
                 const thumbUrl = r?.thumbnail && typeof r.thumbnail === 'string' && r.thumbnail.startsWith('http') ? r.thumbnail : null;
                 const rowStatusId = getStatusId(r.tweetUrl);
                 return (
@@ -348,12 +347,19 @@ export default function ResultsContent({
                     <p className="text-xs text-gray-600">{qualityLabel}: {label}</p>
                     {hasUrl ? (
                       <a
-                        href={proxyUrl}
+                        href={v.url}
                         download={fname}
                         target="_blank"
                         rel="noopener noreferrer"
                         className={`flex items-center justify-center w-full min-h-[44px] px-4 py-3 rounded-lg text-sm font-medium transition ${accentClass}`}
-                        onClick={handleGuestDownloadClick}
+                        onClick={(e) =>
+                          handleMediaDownloadClick(e, {
+                            url: v.url,
+                            filename: fname,
+                            origin: window.location.origin,
+                            onBefore: handleGuestDownloadClick,
+                          })
+                        }
                       >
                         {downloadVideoLabel} {label}
                       </a>
@@ -382,7 +388,6 @@ export default function ResultsContent({
                     const label = v.label || v.quality || '';
                     const ext = v.mediaType === 'photo' ? (v.ext || 'jpg') : 'mp4';
                 const fname = buildDownloadFileName(ext);
-                    const proxyUrl = hasUrl ? `/api/download/file?url=${encodeURIComponent(v.url)}&filename=${encodeURIComponent(fname)}` : '#';
                     const thumbUrl = r?.thumbnail && typeof r.thumbnail === 'string' && r.thumbnail.startsWith('http') ? r.thumbnail : null;
                     const rowStatusId = getStatusId(r.tweetUrl);
                     return (
@@ -400,12 +405,19 @@ export default function ResultsContent({
                         <td className="py-3 px-2">
                           {hasUrl ? (
                             <a
-                              href={proxyUrl}
+                              href={v.url}
                               download={fname}
                               target="_blank"
                               rel="noopener noreferrer"
                               className={`inline-block px-4 py-2 rounded-lg text-xs font-medium transition min-h-[36px] ${accentClass}`}
-                              onClick={handleGuestDownloadClick}
+                              onClick={(e) =>
+                                handleMediaDownloadClick(e, {
+                                  url: v.url,
+                                  filename: fname,
+                                  origin: window.location.origin,
+                                  onBefore: handleGuestDownloadClick,
+                                })
+                              }
                             >
                               {downloadVideoLabel} {label}
                             </a>

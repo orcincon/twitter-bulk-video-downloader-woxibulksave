@@ -10,10 +10,10 @@ const FALLBACK = {
     es: 'Límite de descargas gratuitas alcanzado. Inicie sesión con su cuenta de X para descargar.',
   },
   multi: {
-    tr: 'Toplu analiz yapabilmeniz için X girişi yapmanız gerekiyor.',
-    en: 'To run bulk analysis, please sign in with your X account.',
-    de: 'Für Sammelanalysen melden Sie sich bitte mit Ihrem X-Konto an.',
-    es: 'Para análisis en lote, inicie sesión con su cuenta de X.',
+    tr: 'Toplu kayıt yapabilmeniz için X girişi yapmanız gerekiyor.',
+    en: 'To run bulk save, please sign in with your X account.',
+    de: 'Für Sammelspeichern melden Sie sich bitte mit Ihrem X-Konto an.',
+    es: 'Para guardado en lote, inicie sesión con su cuenta de X.',
   },
   hint: {
     tr: 'Merak etmeyin, şifre istemiyoruz.',

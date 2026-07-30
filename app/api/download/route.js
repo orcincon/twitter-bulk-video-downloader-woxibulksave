@@ -2,13 +2,14 @@ import { NextResponse } from 'next/server';
 import { getSessionSafe } from '@/lib/auth.js';
 import { createSupabaseClient, ensureUserInSupabase } from '@/lib/supabase.js';
 import { decryptToken } from '@/lib/token-crypto.js';
+import { canonicalizeResultTweetUrl, fetchFixTweetRaw, parseFixTweetMetadata } from '@/lib/fixtweet.js';
+import { extractTweetId as extractTweetIdFromUrl } from '@/lib/tweet-url.js';
 
 const TWITTER_URL_REGEX = /https?:\/\/(www\.|mobile\.)?(x\.com|twitter\.com)\/[^/]+\/status\/(\d+)/;
 const REQUEST_DELAY_MS = 1500;
 
 function extractTweetId(url) {
-  const m = String(url).match(TWITTER_URL_REGEX);
-  return m ? m[3] : null;
+  return extractTweetIdFromUrl(url);
 }
 
 function isValidTwitterUrl(url) {
@@ -30,6 +31,14 @@ function delay(ms) {
 }
 
 function parseQualityScore(q) {
+  if (typeof q === 'number' && Number.isFinite(q) && q > 0) {
+    if (q >= 100000) return q;
+    if (q >= 1080) return 2073600;
+    if (q >= 720) return 921600;
+    if (q >= 480) return 307200;
+    if (q >= 360) return 129600;
+    return q;
+  }
   if (!q || typeof q !== 'string') return 0;
   const s = String(q).toLowerCase();
   const match = s.match(/(\d+)\s*[pPx×]?\s*(\d+)?/);
@@ -47,6 +56,20 @@ function parseQualityScore(q) {
 }
 
 function getQualityBand(q) {
+  if (typeof q === 'number' && Number.isFinite(q) && q > 0) {
+    if (q >= 100000) {
+      if (q >= 1900000) return '1080p';
+      if (q >= 800000) return '720p';
+      if (q >= 300000) return '480p';
+      if (q >= 100000) return '360p';
+      return 'other';
+    }
+    if (q >= 1080) return '1080p';
+    if (q >= 720) return '720p';
+    if (q >= 480) return '480p';
+    if (q >= 360) return '360p';
+    return 'other';
+  }
   if (!q || typeof q !== 'string') return 'other';
   const s = String(q).toLowerCase();
   if (s.includes('1080') || s.includes('fullhd')) return '1080p';
@@ -68,14 +91,37 @@ function formatQualityLabel(q) {
   return band !== 'other' ? band : 'Standard';
 }
 
-function dedupeLimitAndLabel(videos, max = 3) {
+function isPlayableVideoUrl(url) {
+  return typeof url === 'string' && url.startsWith('http') && !url.includes('t.co') && !url.includes('avatar') && !url.includes('.m3u8');
+}
+
+function pickBestVariant(variants) {
+  let best = null;
+  let bestScore = -1;
+  for (const v of variants || []) {
+    const u = v?.url || v?.src;
+    if (!isPlayableVideoUrl(u)) continue;
+    const quality = v?.bitrate || v?.quality || 'best';
+    const score = parseQualityScore(quality);
+    if (score >= bestScore) {
+      bestScore = score;
+      best = {
+        url: u,
+        quality,
+        ...(v?.bitrate != null && Number(v.bitrate) > 0 ? { bitrate: Number(v.bitrate) } : {}),
+      };
+    }
+  }
+  return best;
+}
+
+/** Her medya öğesinden en iyi kaliteyi al; aynı URL'yi bir kez say. */
+function finalizeVideoList(videoList, max = 10) {
   const seen = new Set();
   const out = [];
-  const sorted = [...videos].sort((a, b) => parseQualityScore(b.quality) - parseQualityScore(a.quality));
-  for (const v of sorted) {
-    const band = getQualityBand(v.quality);
-    if (seen.has(band)) continue;
-    seen.add(band);
+  for (const v of videoList) {
+    if (!v?.url || seen.has(v.url)) continue;
+    seen.add(v.url);
     out.push({ ...v, label: formatQualityLabel(v.quality) });
     if (out.length >= max) break;
   }
@@ -127,13 +173,6 @@ function parseSyndicationVideos(data) {
   const videoList = [];
   const photoList = [];
   let thumbnail = null;
-  const addUrl = (u, q = 'best', bitrate = null) => {
-    if (!u || typeof u !== 'string' || !u.startsWith('http') || u.includes('t.co') || u.includes('avatar')) return;
-    if (u.includes('.m3u8')) return;
-    const entry = { url: u, quality: q };
-    if (bitrate != null && Number(bitrate) > 0) entry.bitrate = Number(bitrate);
-    videoList.push(entry);
-  };
 
   const extractFromMedia = (media) => {
     if (!media) return;
@@ -147,9 +186,16 @@ function parseSyndicationVideos(data) {
           }
         }
         const variants = m?.video_info?.variants || m?.variants || [];
-        variants.forEach((v) => {
-          if (v?.url) addUrl(v.url, v?.bitrate || 'best', v?.bitrate);
-        });
+        const best = pickBestVariant(variants);
+        if (best) {
+          const thumb = m.media_url_https || m.media_url;
+          videoList.push({
+            ...best,
+            ...(typeof thumb === 'string' && thumb.startsWith('http') && !thumb.includes('avatar')
+              ? { thumbnail: thumb }
+              : {}),
+          });
+        }
       } else if (m?.type === 'photo') {
         const u = m?.media_url_https || m?.media_url;
         if (u && typeof u === 'string' && u.startsWith('http') && !u.includes('avatar')) {
@@ -175,28 +221,11 @@ function parseSyndicationVideos(data) {
   extractFromMedia(parsed?.entities?.media);
   extractFromMedia(parsed?.extended_entities?.media);
   if (parsed?.video?.variants) {
-    parsed.video.variants.forEach((v) => {
-      const u = v?.src || v?.url;
-      if (u && !u.includes('.m3u8')) addUrl(u, v?.bitrate || 'best');
-    });
-  }
-  const media = parsed?.mediaDetails || parsed?.video?.variants || parsed?.media || [];
-  if (Array.isArray(media)) {
-    media.forEach((v) => {
-      if (v?.type === 'photo') {
-        const u = v?.media_url_https || v?.url || v?.src;
-        if (u && typeof u === 'string' && u.startsWith('http')) {
-          if (!thumbnail) thumbnail = u;
-          photoList.push({ url: u, quality: 'photo', label: 'Görsel', mediaType: 'photo', ext: 'jpg' });
-        }
-      } else {
-        const u = v?.url || v?.src;
-        if (u && !u.includes('.m3u8')) addUrl(u, v?.bitrate || v?.quality || 'best');
-      }
-    });
+    const best = pickBestVariant(parsed.video.variants);
+    if (best) videoList.push(best);
   }
 
-  const videos = [...dedupeLimitAndLabel(videoList), ...photoList];
+  const videos = [...finalizeVideoList(videoList), ...photoList];
   return { videos, thumbnail };
 }
 
@@ -218,6 +247,9 @@ function parseFixTweetVideos(data) {
         url: u,
         quality: v?.bitrate || v?.width || 'best',
         ...(v?.duration != null ? { duration: Math.round(Number(v.duration)) } : {}),
+        ...(v?.thumbnail_url && typeof v.thumbnail_url === 'string' && v.thumbnail_url.startsWith('http')
+          ? { thumbnail: v.thumbnail_url }
+          : {}),
       });
     }
   };
@@ -234,45 +266,8 @@ function parseFixTweetVideos(data) {
   if (media.video) addVideo(media.video);
   if (Array.isArray(media.photos)) media.photos.forEach(addPhoto);
   else if (media.photos) addPhoto(media.photos);
-  const videos = [...dedupeLimitAndLabel(videoList), ...photoList];
+  const videos = [...finalizeVideoList(videoList), ...photoList];
   return { videos, thumbnail };
-}
-
-function parseFixTweetMetadata(data) {
-  const t = data?.tweet;
-  if (!t) return null;
-  let duration = null;
-  const media = t?.media;
-  if (media) {
-    const vid = Array.isArray(media?.videos) ? media.videos[0] : media?.video || media?.videos;
-    const ext = media?.external;
-    if (vid?.duration != null) duration = Math.round(Number(vid.duration));
-    else if (ext?.duration != null) duration = Math.round(Number(ext.duration));
-  }
-  return {
-    likes: typeof t.likes === 'number' ? t.likes : null,
-    retweets: typeof t.retweets === 'number' ? t.retweets : null,
-    views: typeof t.views === 'number' ? t.views : null,
-    created_at: typeof t.created_at === 'string' ? t.created_at : null,
-    created_timestamp: typeof t.created_timestamp === 'number' ? t.created_timestamp : null,
-    duration,
-  };
-}
-
-async function fetchFixTweetRaw(tweetUrl) {
-  try {
-    const url = `https://api.fxtwitter.com${new URL(tweetUrl).pathname}`;
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; WBS/1.0)' },
-      cache: 'no-store',
-      signal: AbortSignal.timeout(8000),
-    });
-    if (!res.ok) return null;
-    return await res.json().catch(() => null);
-  } catch (_) {
-    return null;
-  }
 }
 
 async function fetchViaFixTweet(tweetId, tweetUrl) {
@@ -352,7 +347,8 @@ async function fetchVideoForUrl(tweetUrl, sessionAccessToken) {
         const meta = fixRaw ? parseFixTweetMetadata(fixRaw) : null;
         const fixThumb = fixRaw ? parseFixTweetVideos(fixRaw).thumbnail : null;
         const thumbnail = result.thumbnail || fixThumb || null;
-        return { tweetUrl, status: 'success', videos: result.videos, thumbnail, metadata: meta || null, error: null };
+        const canonicalUrl = canonicalizeResultTweetUrl(tweetUrl, meta);
+        return { tweetUrl: canonicalUrl, status: 'success', videos: result.videos, thumbnail, metadata: meta || null, error: null };
       }
       if (result === null) continue;
       if (result?.httpStatus === 401 || result?.httpStatus === 403) {
@@ -366,7 +362,15 @@ async function fetchVideoForUrl(tweetUrl, sessionAccessToken) {
 
   const fixTweetResult = await fetchViaFixTweet(tweetId, tweetUrl);
   if (fixTweetResult?.videos?.length > 0) {
-    return { tweetUrl, status: 'success', videos: fixTweetResult.videos, thumbnail: fixTweetResult.thumbnail || null, metadata: fixTweetResult.metadata || null, error: null };
+    const canonicalUrl = canonicalizeResultTweetUrl(tweetUrl, fixTweetResult.metadata);
+    return {
+      tweetUrl: canonicalUrl,
+      status: 'success',
+      videos: fixTweetResult.videos,
+      thumbnail: fixTweetResult.thumbnail || null,
+      metadata: fixTweetResult.metadata || null,
+      error: null,
+    };
   }
 
   const noMediaMsg = 'Bu gönderi medya içermiyor';

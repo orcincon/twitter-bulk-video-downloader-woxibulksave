@@ -7,6 +7,7 @@ import DevMobilePreview from "../components/DevMobilePreview.js";
 import VisitTracker from "../components/VisitTracker.js";
 import { JsonLd } from "../components/JsonLd.js";
 import FontAwesomeAsync from "../components/FontAwesomeAsync.js";
+import GoogleAnalytics from "../components/GoogleAnalytics.js";
 import { BRAND, SEO_BY_LANG, buildRootJsonLd, getBaseUrl } from "../lib/seo.js";
 
 const inter = Inter({
@@ -97,6 +98,7 @@ export default function RootLayout({
         </noscript>
       </head>
       <body className={`${inter.variable} font-sans antialiased text-slate-900`} style={{ backgroundColor: '#f4f9ff' }}>
+        <GoogleAnalytics />
         <SessionProvider>
           <FontAwesomeAsync />
           <Suspense fallback={null}>

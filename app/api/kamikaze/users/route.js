@@ -15,7 +15,7 @@ function isMissingColumnError(error) {
 async function fetchRegisteredUsers(supabase) {
   const full = await supabase
     .from('users')
-    .select('id, email, name, image, preferred_language, created_at, updated_at, access_token')
+    .select('id, email, name, username, image, preferred_language, created_at, updated_at, access_token')
     .order('created_at', { ascending: false });
 
   if (!full.error) return full;

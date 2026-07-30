@@ -1,104 +1,167 @@
 import { NextResponse } from 'next/server';
-import { assertKamikazeAccess } from '@/lib/kamikaze-auth.js';
-import { aggregateVisitorRows, analysisLogToVisitorRow, formatReferrerLabel, isInternalReferrer } from '@/lib/visitor-stats.js';
-import { shouldSkipVisit } from '@/lib/record-site-visit.js';
+import { cookies } from 'next/headers';
+import { createHash } from 'crypto';
+import { createSupabaseClient } from '@/lib/supabase.js';
+import { formatReferrerLabel, aggregateVisitorRows } from '@/lib/visitor-stats.js';
 
-const DAY_BUCKETS = 14;
-const WEEK_BUCKETS = 8;
+const PAGE_SIZE = 1000;
+const MAX_ROWS = 50000;
+const DAILY_DAYS = 15;
 
-function aggregateReferrers(visitRows) {
-  const byLabel = new Map();
-  for (const row of visitRows) {
-    const label = formatReferrerLabel(row.referrer);
-    const href = row.referrer && !isInternalReferrer(row.referrer) ? row.referrer : null;
-    const cur = byLabel.get(label) || { label, referrer: href, count: 0 };
-    cur.count += 1;
-    if (!cur.referrer && href) cur.referrer = href;
-    byLabel.set(label, cur);
-  }
-  return [...byLabel.values()].sort((a, b) => b.count - a.count).slice(0, 25);
+function makeToken(email, secret) {
+  return createHash('sha256').update(`${email || ''}:${secret}`).digest('hex');
 }
 
-export async function GET(request) {
-  const auth = await assertKamikazeAccess();
-  if (auth.error) return auth.error;
-  const { supabase } = auth;
+function normalizePath(path) {
+  if (!path || typeof path !== 'string') return '/';
+  const trimmed = path.trim() || '/';
+  const base = trimmed.split('?')[0] || '/';
+  if (base !== '/' && base.endsWith('/')) return base.slice(0, -1);
+  return base;
+}
 
-  const granularity = new URL(request.url).searchParams.get('granularity') === 'week' ? 'week' : 'day';
-  const bucketCount = granularity === 'week' ? WEEK_BUCKETS : DAY_BUCKETS;
-  const sinceDays = granularity === 'week' ? WEEK_BUCKETS * 7 + 7 : DAY_BUCKETS + 1;
-  const since = new Date();
-  since.setUTCDate(since.getUTCDate() - sinceDays);
-  const sinceIso = since.toISOString();
+function isMissingTableError(error) {
+  const message = String(error?.message || '');
+  return (
+    error?.code === '42P01' ||
+    error?.code === 'PGRST205' ||
+    /site_visits/i.test(message) ||
+    /does not exist/i.test(message) ||
+    /Could not find the table/i.test(message)
+  );
+}
+
+async function fetchAllSiteVisits(supabase) {
+  const rows = [];
+  let from = 0;
+
+  while (from < MAX_ROWS) {
+    const to = Math.min(from + PAGE_SIZE - 1, MAX_ROWS - 1);
+    const { data, error } = await supabase
+      .from('site_visits')
+      .select('visitor_key, path, referrer, created_at')
+      .order('created_at', { ascending: false })
+      .range(from, to);
+
+    if (error) return { rows, error };
+    if (!data?.length) break;
+
+    rows.push(...data);
+    if (data.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
+  }
+
+  return { rows, error: null };
+}
+
+function aggregateVisits(rows) {
+  const uniqueVisitors = new Set();
+  const pageMap = new Map();
+  const referrerMap = new Map();
+
+  for (const row of rows) {
+    const visitorKey = String(row.visitor_key || 'anon:unknown');
+    uniqueVisitors.add(visitorKey);
+
+    const path = normalizePath(row.path);
+    let page = pageMap.get(path);
+    if (!page) {
+      page = { path, visits: 0, unique: new Set() };
+      pageMap.set(path, page);
+    }
+    page.visits += 1;
+    page.unique.add(visitorKey);
+
+    const referrerRaw = typeof row.referrer === 'string' ? row.referrer.trim() : '';
+    const label = formatReferrerLabel(referrerRaw || null);
+    const key = referrerRaw && label !== 'Doğrudan / bilinmiyor' ? referrerRaw : '__direct__';
+    let ref = referrerMap.get(key);
+    if (!ref) {
+      ref = {
+        label,
+        referrer: key === '__direct__' ? null : referrerRaw,
+        visits: 0,
+        unique: new Set(),
+      };
+      referrerMap.set(key, ref);
+    }
+    ref.visits += 1;
+    ref.unique.add(visitorKey);
+  }
+
+  const pages = [...pageMap.values()]
+    .map(({ path, visits, unique }) => ({
+      path,
+      visits,
+      uniqueVisitors: unique.size,
+    }))
+    .sort((a, b) => b.visits - a.visits || a.path.localeCompare(b.path));
+
+  const referrers = [...referrerMap.values()]
+    .map(({ label, referrer, visits, unique }) => ({
+      label,
+      referrer,
+      visits,
+      uniqueVisitors: unique.size,
+    }))
+    .sort((a, b) => b.visits - a.visits || a.label.localeCompare(b.label, 'tr'));
+
+  return {
+    uniqueVisitors: uniqueVisitors.size,
+    totalVisits: rows.length,
+    pages,
+    referrers,
+    daily: aggregateVisitorRows(rows, 'day', DAILY_DAYS).breakdown,
+  };
+}
+
+export async function GET() {
+  const allowedEmail = (process.env.KAMIKAZE_EMAIL || '').trim().toLowerCase();
+  const allowedSecret = (process.env.KAMIKAZE_SECRET || '').trim();
+  if (!allowedSecret) {
+    return NextResponse.json({ error: 'NOT_CONFIGURED' }, { status: 503 });
+  }
+
+  const expectedToken = makeToken(allowedEmail, allowedSecret);
+  const cookieStore = await cookies();
+  const token = cookieStore.get('kamikaze')?.value;
+  if (token !== expectedToken) {
+    return NextResponse.json({ error: 'UNAUTHORIZED' }, { status: 401 });
+  }
+
+  const serviceRoleConfigured = Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY);
+  const supabase = createSupabaseClient();
+  if (!supabase) {
+    return NextResponse.json({ error: 'SUPABASE_NOT_CONFIGURED' }, { status: 503 });
+  }
 
   try {
-    const rows = [];
-    let visitRows = [];
-    let visitError = null;
+    const { rows, error } = await fetchAllSiteVisits(supabase);
 
-    const visitRes = await supabase
-      .from('site_visits')
-      .select('visitor_key, created_at, referrer, path, client_ip, user_id')
-      .gte('created_at', sinceIso)
-      .order('created_at', { ascending: false })
-      .limit(100000);
-
-    visitRows = (visitRes.data ?? []).filter(
-      (row) => !shouldSkipVisit({ path: row.path, referrer: row.referrer })
-    );
-    visitError = visitRes.error;
-
-    if (!visitError) {
-      rows.push(...visitRows.map(({ visitor_key, created_at }) => ({ visitor_key, created_at })));
-    } else if (visitError.code !== '42P01') {
-      console.warn('[kamikaze/visitors] site_visits:', visitError.message);
-    }
-
-    const usingAnalysisFallback = rows.length === 0 && !visitError;
-
-    if (usingAnalysisFallback) {
-      const { data: logRows, error: logError } = await supabase
-        .from('analysis_logs')
-        .select('user_id, client_ip, created_at')
-        .gte('created_at', sinceIso)
-        .order('created_at', { ascending: false })
-        .limit(100000);
-
-      if (!logError) {
-        for (const log of logRows ?? []) {
-          const mapped = analysisLogToVisitorRow(log);
-          if (mapped) rows.push(mapped);
-        }
-      } else {
-        console.warn('[kamikaze/visitors] analysis_logs:', logError.message);
+    if (error) {
+      if (isMissingTableError(error)) {
+        return NextResponse.json({
+          uniqueVisitors: 0,
+          totalVisits: 0,
+          pages: [],
+          referrers: [],
+          daily: [],
+          tableReady: false,
+          serviceRoleConfigured,
+          truncated: false,
+        });
       }
+      console.warn('[kamikaze/visitors]', error.message);
+      return NextResponse.json({ error: 'QUERY_FAILED' }, { status: 500 });
     }
 
-    const stats = aggregateVisitorRows(rows, granularity, bucketCount);
-    const referrers = !visitError ? aggregateReferrers(visitRows) : [];
-    const recentVisits = !visitError
-      ? visitRows.slice(0, 40).map((v) => ({
-          created_at: v.created_at,
-          path: v.path || '/',
-          referrer: v.referrer && !isInternalReferrer(v.referrer) ? v.referrer : null,
-          referrerLabel: formatReferrerLabel(v.referrer),
-          client_ip: v.client_ip || null,
-          user_id: v.user_id || null,
-        }))
-      : [];
-
-    const serviceRoleConfigured = Boolean((process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim());
+    const aggregated = aggregateVisits(rows);
 
     return NextResponse.json({
-      granularity,
-      uniqueVisitors: stats.uniqueVisitors,
-      totalVisits: stats.totalVisits,
-      breakdown: stats.breakdown,
-      usingAnalysisFallback,
-      tableReady: !visitError,
+      ...aggregated,
+      tableReady: true,
       serviceRoleConfigured,
-      referrers,
-      recentVisits,
+      truncated: rows.length >= MAX_ROWS,
     });
   } catch (err) {
     console.warn('[kamikaze/visitors]', err);

@@ -4,6 +4,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import MetadataIcons from './MetadataIcons.js';
 import { buildDownloadFileName, buildZipFileName } from '@/lib/download-filename.js';
+import { downloadMediaInBrowser, fetchMediaBlob, handleMediaDownloadClick } from '@/lib/client-download.js';
 import {
   clearGuestDownloadCount,
   isGuestLimitReached,
@@ -70,6 +71,8 @@ async function fetchBulkThumbnailForLink(url, statusId) {
 }
 
 const TWITTER_URL_PATTERN = /https?:\/\/(?:www\.|mobile\.)?(?:x\.com|twitter\.com)\/(?:(?!https?:\/\/)[^\s])*/gi;
+
+const SAMPLE_LINK = 'https://x.com/gunde5_com/status/2079477455601987829?s=20';
 
 const TRAILING_CHARS = /[)\]\}\"'\`.,;:!?>\s]+$/;
 const LEADING_CHARS = /^[(\[\{\"'\`\s]+/;
@@ -147,6 +150,7 @@ export default function BulkDownloadSection({
   const [isProcessing, setIsProcessing] = useState(false);
   const [results, setResults] = useState([]);
   const [error, setError] = useState(null);
+  const [downloadNotice, setDownloadNotice] = useState(null);
   const [isBulkDownloading, setIsBulkDownloading] = useState(false);
   const [saveHistoryMessage, setSaveHistoryMessage] = useState(null);
   const [signInToast, setSignInToast] = useState(null); // null | 'limit' | 'multi'
@@ -154,14 +158,16 @@ export default function BulkDownloadSection({
   const [showPasteLinksModal, setShowPasteLinksModal] = useState(false);
   const [pasteLinksModalReason, setPasteLinksModalReason] = useState('no_links'); // 'no_links' | 'no_media' | 'analyzing'
   const [pendingDownload, setPendingDownload] = useState(null); // null | { type: 'quality', mode } | { type: 'zip' }
+  const [activeDownload, setActiveDownload] = useState(null); // null | { type: 'quality', mode } | { type: 'zip' }
   const requestInProgress = useRef(false);
   const prevLinksKeyRef = useRef('');
+  const downloadedPostKeysRef = useRef(new Set());
   const bulkThumbnailsRef = useRef({});
   bulkThumbnailsRef.current = bulkThumbnails;
 
   const pasteLinksModalTextDefault = lang === 'tr' ? 'Lütfen önce Twitter/X gönderi linklerini yapıştırın.' : lang === 'de' ? 'Bitte fügen Sie zuerst Twitter/X-Beitragslinks ein.' : lang === 'es' ? 'Por favor, pegue primero los enlaces de publicaciones de Twitter/X.' : 'Please paste Twitter/X post links first.';
-  const noDownloadableMediaModalTextDefault = lang === 'tr' ? 'Bu gönderilerde analiz edilebilir medya bulunamadı. Analiz henüz tamamlanmamış olabilir veya gönderilerde video/görsel yoktur.' : lang === 'de' ? 'In diesen Beiträgen wurde kein analysierbares Medium gefunden. Die Analyse läuft möglicherweise noch oder die Beiträge enthalten keine Videos/Bilder.' : lang === 'es' ? 'No se encontró contenido analizable en estas publicaciones. El análisis puede seguir en curso o las publicaciones no contienen vídeo/imagen.' : 'No analyzable media found in these posts. Analysis may still be in progress or the posts may not contain video/images.';
-  const analyzingModalTextDefault = lang === 'tr' ? 'Analiz devam ediyor. Lütfen birkaç saniye bekleyip tekrar deneyin.' : lang === 'de' ? 'Die Analyse läuft noch. Bitte warten Sie einige Sekunden und versuchen Sie es erneut.' : lang === 'es' ? 'El análisis sigue en curso. Espere unos segundos e inténtelo de nuevo.' : 'Analysis is still in progress. Please wait a few seconds and try again.';
+  const noDownloadableMediaModalTextDefault = lang === 'tr' ? 'Bu gönderilerde kaydedilebilir medya bulunamadı. Kayıt henüz tamamlanmamış olabilir veya gönderilerde video/görsel yoktur.' : lang === 'de' ? 'In diesen Beiträgen wurde kein speicherbares Medium gefunden. Das Speichern läuft möglicherweise noch oder die Beiträge enthalten keine Videos/Bilder.' : lang === 'es' ? 'No se encontró contenido guardable en estas publicaciones. El guardado puede seguir en curso o las publicaciones no contienen vídeo/imagen.' : 'No saveable media found in these posts. Save may still be in progress or the posts may not contain video/images.';
+  const analyzingModalTextDefault = lang === 'tr' ? 'Kayıt devam ediyor. Lütfen birkaç saniye bekleyip tekrar deneyin.' : lang === 'de' ? 'Das Speichern läuft noch. Bitte warten Sie einige Sekunden und versuchen Sie es erneut.' : lang === 'es' ? 'El guardado sigue en curso. Espere unos segundos e inténtelo de nuevo.' : 'Save is still in progress. Please wait a few seconds and try again.';
   const pasteLinksModalText =
     pasteLinksModalReason === 'analyzing'
       ? (common.analyzingModalText || analyzingModalTextDefault)
@@ -264,12 +270,44 @@ export default function BulkDownloadSection({
   const downloadingLabel = ui.downloading || 'Downloading...';
   const clearAndNewLabel = ui.clearAndNew || 'Clear & Search New';
   const zipOptionLabel = ui.zipOption || 'Bulk (ZIP)';
-  const browserPermissionHint = ui.browserPermissionHint || (lang === 'tr' ? 'Sıralı analizde tarayıcı izni gerekebilir.' : lang === 'de' ? 'Bei sequenzieller Analyse kann eine Browsererlaubnis erforderlich sein.' : lang === 'es' ? 'El análisis secuencial puede requerir permiso del navegador.' : 'Sequential analysis may require browser permission.');
+  const browserPermissionHint = ui.browserPermissionHint || (lang === 'tr' ? 'Sıralı kayıtta tarayıcı izni gerekebilir.' : lang === 'de' ? 'Bei sequenziellem Speichern kann eine Browsererlaubnis erforderlich sein.' : lang === 'es' ? 'El guardado secuencial puede requerir permiso del navegador.' : 'Sequential save may require browser permission.');
+  const buttonsBusy = isBulkDownloading || (isProcessing && !!pendingDownload);
+  const alreadyDownloadedLabel =
+    lang === 'tr'
+      ? 'Bu videoyu bu oturumda daha önce indirdiniz.'
+      : lang === 'de'
+        ? 'Sie haben dieses Video in dieser Sitzung bereits heruntergeladen.'
+        : lang === 'es'
+          ? 'Ya descargaste este video en esta sesión.'
+          : 'You already downloaded this video in this session.';
+
+  const getDownloadKey = useCallback((video) => {
+    if (video?.url && typeof video.url === 'string') return `media:${video.url}`;
+    const statusId = getStatusId(video?.tweetUrl);
+    return statusId ? `post:${statusId}` : 'unknown';
+  }, []);
+
+  const filterNewDownloads = useCallback(
+    (videos) => {
+      const fresh = videos.filter((video) => !downloadedPostKeysRef.current.has(getDownloadKey(video)));
+      if (fresh.length < videos.length) setDownloadNotice(alreadyDownloadedLabel);
+      else setDownloadNotice(null);
+      return fresh;
+    },
+    [alreadyDownloadedLabel, getDownloadKey]
+  );
+
+  const markDownloaded = useCallback(
+    (video) => {
+      downloadedPostKeysRef.current.add(getDownloadKey(video));
+    },
+    [getDownloadKey]
+  );
 
   const bulkSignInRequiredLabel =
     common.guestBulkInlineMessage ||
     (lang === 'tr'
-      ? 'Toplu analiz yapabilmeniz için X girişi yapmanız gerekiyor.'
+      ? 'Toplu kayıt yapabilmeniz için X girişi yapmanız gerekiyor.'
       : lang === 'de'
         ? 'X-Anmeldung erforderlich'
         : lang === 'es'
@@ -433,6 +471,10 @@ export default function BulkDownloadSection({
     if (q.includes('görsel') || q.includes('photo') || q.includes('image')) return 'photo';
     const num = parseInt(String(v?.quality || ''), 10);
     if (!isNaN(num)) {
+      if (num >= 1080) return '1080p';
+      if (num >= 720) return '720p';
+      if (num >= 480) return '480p';
+      if (num >= 360) return '360p';
       if (num >= 1900000) return '1080p';
       if (num >= 800000) return '720p';
       if (num >= 300000) return '480p';
@@ -447,12 +489,12 @@ export default function BulkDownloadSection({
 
   const collectDownloadableVideos = useCallback((mode) => {
     const successResults = results.filter((r) => r.status === 'success' && r.videos?.length > 0);
-    const pickBest = (r) => {
-      const first = (r.videos || []).find((v) => v?.url && typeof v.url === 'string' && v.url.startsWith('http'));
-      return first ? { ...first, tweetUrl: r.tweetUrl } : null;
-    };
+    const listVideos = (r) =>
+      (r.videos || [])
+        .filter((v) => v?.url && typeof v.url === 'string' && v.url.startsWith('http'))
+        .map((v) => ({ ...v, tweetUrl: r.tweetUrl }));
     if (mode === 'best') {
-      return successResults.map(pickBest).filter(Boolean);
+      return successResults.flatMap(listVideos);
     }
     const matched = successResults.flatMap((r) =>
       (r.videos || [])
@@ -460,7 +502,7 @@ export default function BulkDownloadSection({
         .map((v) => ({ ...v, tweetUrl: r.tweetUrl }))
     );
     if (matched.length > 0) return matched;
-    return successResults.map(pickBest).filter(Boolean);
+    return successResults.flatMap(listVideos);
   }, [results]);
 
   const requestDownload = useCallback((payload) => {
@@ -519,8 +561,12 @@ export default function BulkDownloadSection({
 
   const handleDownloadByQuality = useCallback(
     async (mode) => {
-      const allVideos = collectDownloadableVideos(mode);
+      const allVideos = filterNewDownloads(collectDownloadableVideos(mode));
       if (allVideos.length === 0) {
+        if (downloadNotice || collectDownloadableVideos(mode).length > 0) {
+          setDownloadNotice(alreadyDownloadedLabel);
+          return;
+        }
         const failed = results.find((r) => r.status === 'error');
         if (failed?.error) {
           setError(failed.error);
@@ -531,34 +577,35 @@ export default function BulkDownloadSection({
         return;
       }
       setIsBulkDownloading(true);
+      setActiveDownload({ type: 'quality', mode });
       setError(null);
       const origin = typeof window !== 'undefined' ? window.location.origin : '';
-      const linksToClick = allVideos.map((v) => {
-        const ext = v.mediaType === 'photo' ? (v.ext || 'jpg') : 'mp4';
-        const fname = buildDownloadFileName(ext);
-        const proxyUrl = `${origin}/api/download/file?url=${encodeURIComponent(v.url)}&filename=${encodeURIComponent(fname)}`;
-        return { proxyUrl, fname };
-      });
-      for (const { proxyUrl, fname } of linksToClick) {
-        const a = document.createElement('a');
-        a.href = proxyUrl;
-        a.download = fname;
-        a.rel = 'noopener noreferrer';
-        a.style.display = 'none';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
+      try {
+        for (let i = 0; i < allVideos.length; i++) {
+          const v = allVideos[i];
+          const ext = v.mediaType === 'photo' ? (v.ext || 'jpg') : 'mp4';
+          const fname = buildDownloadFileName(ext);
+          await downloadMediaInBrowser(v.url, fname, origin);
+          markDownloaded(v);
+          if (i < allVideos.length - 1) await new Promise((r) => setTimeout(r, 400));
+        }
+        if (!isLoggedIn) recordGuestDownloads(1);
+      } finally {
+        setIsBulkDownloading(false);
+        setActiveDownload(null);
       }
-      if (!isLoggedIn) recordGuestDownloads(1);
-      setIsBulkDownloading(false);
     },
-    [results, collectDownloadableVideos, isLoggedIn]
+    [results, collectDownloadableVideos, filterNewDownloads, markDownloaded, alreadyDownloadedLabel, downloadNotice, isLoggedIn]
   );
   handleDownloadByQualityRef.current = handleDownloadByQuality;
 
   const handleDownloadAsZip = useCallback(async () => {
-    const allVideos = collectDownloadableVideos('best');
+    const allVideos = filterNewDownloads(collectDownloadableVideos('best'));
     if (allVideos.length === 0) {
+      if (downloadNotice || collectDownloadableVideos('best').length > 0) {
+        setDownloadNotice(alreadyDownloadedLabel);
+        return;
+      }
       const failed = results.find((r) => r.status === 'error');
       if (failed?.error) {
         setError(failed.error);
@@ -569,6 +616,7 @@ export default function BulkDownloadSection({
       return;
     }
     setIsBulkDownloading(true);
+    setActiveDownload({ type: 'zip' });
     setError(null);
     const origin = typeof window !== 'undefined' ? window.location.origin : '';
     try {
@@ -578,11 +626,11 @@ export default function BulkDownloadSection({
         const v = allVideos[i];
         const ext = v.mediaType === 'photo' ? (v.ext || 'jpg') : 'mp4';
         const fname = buildDownloadFileName(ext);
-        const proxyUrl = `${origin}/api/download/file?url=${encodeURIComponent(v.url)}&filename=${encodeURIComponent(fname)}`;
-        const res = await fetch(proxyUrl);
-        if (res.ok) {
-          const blob = await res.blob();
+        try {
+          const blob = await fetchMediaBlob(v.url, fname, origin);
           zip.file(fname, blob);
+        } catch {
+          /* skip failed file */
         }
         if (i < allVideos.length - 1) await new Promise((r) => setTimeout(r, 300));
       }
@@ -592,11 +640,14 @@ export default function BulkDownloadSection({
       a.download = buildZipFileName();
       a.click();
       URL.revokeObjectURL(a.href);
+      allVideos.forEach(markDownloaded);
     } catch (err) {
       setError(err?.message || (common.zipDownloadFailed || (lang === 'tr' ? 'ZIP oluşturulamadı.' : lang === 'de' ? 'ZIP konnte nicht erstellt werden.' : lang === 'es' ? 'No se pudo crear el ZIP.' : 'ZIP could not be created.')));
+    } finally {
+      setIsBulkDownloading(false);
+      setActiveDownload(null);
     }
-    setIsBulkDownloading(false);
-  }, [results, collectDownloadableVideos, lang, common, videoNotFoundFriendly]);
+  }, [results, collectDownloadableVideos, filterNewDownloads, markDownloaded, alreadyDownloadedLabel, downloadNotice, lang, common, videoNotFoundFriendly]);
 
   handleDownloadAsZipRef.current = handleDownloadAsZip;
 
@@ -652,9 +703,13 @@ export default function BulkDownloadSection({
     setResults([]);
     setBulkThumbnails({});
     setError(null);
+    setDownloadNotice(null);
     setSaveHistoryMessage(null);
     setAnalyzeRequested(false);
     setSignInToast(null);
+    setPendingDownload(null);
+    setActiveDownload(null);
+    setIsBulkDownloading(false);
   }, []);
 
   const removeLink = useCallback((urlToRemove) => {
@@ -668,6 +723,42 @@ export default function BulkDownloadSection({
     });
   }, []);
 
+  const sampleLinkLabel =
+    lang === 'tr' ? 'Örnek link' : lang === 'de' ? 'Beispiellink' : lang === 'es' ? 'Enlace de ejemplo' : 'Sample link';
+
+  const applySampleLink = useCallback(() => {
+    if (isProcessing || isBulkDownloading) return;
+
+    clearTimeout(extractTimeoutRef.current);
+    extractTimeoutRef.current = null;
+
+    const extracted = extractTwitterUrls(SAMPLE_LINK);
+    const sameAsCurrent =
+      links.length === extracted.length && links.every((url, index) => url === extracted[index]);
+
+    setError(null);
+    setDownloadNotice(null);
+    setAnalyzeRequested(false);
+    setSignInToast(null);
+    setPendingDownload(null);
+    setActiveDownload(null);
+    setSaveHistoryMessage(null);
+    setRawText(SAMPLE_LINK);
+
+    if (sameAsCurrent) {
+      setResults([]);
+      setBulkThumbnails({});
+      prevLinksKeyRef.current = '';
+      handleDownloadRef.current({ showSignInToast: false, retryErrors: true });
+      return;
+    }
+
+    prevLinksKeyRef.current = '';
+    setResults([]);
+    setBulkThumbnails({});
+    setLinks(extracted);
+  }, [isProcessing, isBulkDownloading, links]);
+
   const inputClass = themeInputStyles[theme] || themeInputStyles.dark;
   const cardClass = themeCardStyles[theme] || themeCardStyles.dark;
   const removeClass = themeRemoveStyles[theme] || themeRemoveStyles.dark;
@@ -678,6 +769,24 @@ export default function BulkDownloadSection({
   const successResults = results.filter((r) => r.status === 'success' && r.videos?.length > 0);
 
   const linkToResult = buildResultsByStatusId(results);
+
+  const linkDisplayRows = links.flatMap((url) => {
+    const statusId = getStatusId(url);
+    const r = statusId ? (linkToResult.get(statusId) ?? null) : null;
+    const playableVideos = (r?.videos || []).filter(
+      (v) => v?.url && typeof v.url === 'string' && v.url.startsWith('http') && v.mediaType !== 'photo'
+    );
+    const rowCount = Math.max(1, playableVideos.length);
+    return Array.from({ length: rowCount }, (_, videoIndex) => ({
+      url,
+      statusId,
+      r,
+      video: playableVideos[videoIndex] || null,
+      videoIndex,
+      showRemove: videoIndex === 0,
+      rowKey: playableVideos[videoIndex]?.url || `${statusId || url}-${videoIndex}`,
+    }));
+  });
 
   const BAND_ORDER = ['1080p', '720p', '480p', '360p', 'photo', 'other'];
   const availableQualities = (() => {
@@ -706,25 +815,43 @@ export default function BulkDownloadSection({
   const getBandLabel = (b) => BAND_LABELS[lang]?.[b] || BAND_LABELS.en[b] || b;
 
   const isWbs = variant === 'wbs';
-  const wbsPlaceholder = lang === 'tr' ? 'X/Twitter linklerini buraya tek tek veya toplu halde yapıştırın...' : lang === 'de' ? 'X/Twitter-Links hier einzeln oder gebündelt einfügen...' : lang === 'es' ? 'Pegue los enlaces de X/Twitter aquí uno por uno o en masa...' : 'Paste X/Twitter links here, one per line or in bulk...';
-  const wbsHint = lang === 'tr' ? 'Link yapıştırıldığı an otomatik analiz başlar' : lang === 'de' ? 'Die Analyse startet automatisch beim Einfügen des Links' : lang === 'es' ? 'El análisis comienza automáticamente al pegar el enlace' : 'Analysis starts automatically when you paste a link';
+  const wbsPlaceholder =
+    lang === 'tr'
+      ? 'X/Twitter linklerini buraya yapıştırın...'
+      : lang === 'de'
+        ? 'X/Twitter-Links hier einfügen...'
+        : lang === 'es'
+          ? 'Pegue enlaces de X/Twitter aquí...'
+          : 'Paste X/Twitter links here...';
+
+  const sampleLinkButton = (
+    <button
+      type="button"
+      onClick={applySampleLink}
+      disabled={isProcessing || isBulkDownloading}
+      className="text-xs sm:text-sm underline underline-offset-2 transition disabled:opacity-50 disabled:cursor-not-allowed text-[#1d9bf0] hover:text-[#1a8cd8] whitespace-nowrap"
+    >
+      {sampleLinkLabel}
+    </button>
+  );
 
   return (
     <section className="w-full space-y-4 sm:space-y-6">
       {isWbs ? (
-        <div className="glass-input p-3 rounded-2xl shadow-xl border border-white/20">
-          <textarea
-            value={rawText}
-            onChange={handleChange}
-            placeholder={wbsPlaceholder}
-            rows={3}
-            className="w-full p-3 bg-transparent text-slate-800 placeholder:text-slate-400 focus:outline-none text-sm border-none resize-none mb-2"
-            aria-label="X/Twitter video linkleri"
-          />
-          <p className="text-[10px] text-slate-400 font-medium mt-3 uppercase tracking-wide">
-            <i className="fa-solid fa-circle-check text-blue-500 mr-1" aria-hidden />
-            {wbsHint}
-          </p>
+        <div className="glass-input p-2.5 sm:p-3 rounded-2xl shadow-xl border border-white/20">
+          <div className="flex flex-col sm:flex-row sm:items-start sm:gap-2">
+            <textarea
+              value={rawText}
+              onChange={handleChange}
+              placeholder={wbsPlaceholder}
+              rows={3}
+              className="w-full sm:flex-1 min-w-0 p-2 sm:p-3 bg-transparent text-slate-800 text-[11px] sm:text-sm placeholder:text-[10px] sm:placeholder:text-sm placeholder:text-slate-400 placeholder:whitespace-nowrap focus:outline-none border-none resize-none"
+              aria-label="X/Twitter video linkleri"
+            />
+            <div className="flex justify-center sm:justify-end sm:shrink-0 sm:pt-2 sm:pr-1">
+              {sampleLinkButton}
+            </div>
+          </div>
           {(rawText.length > 0 || links.length > 0) && (
             <div className="flex justify-end mt-2">
               <button type="button" onClick={clearAndReset} className="text-xs text-slate-500 hover:text-slate-700 underline">{clearAndNewLabel}</button>
@@ -738,32 +865,38 @@ export default function BulkDownloadSection({
               <button type="button" onClick={clearAndReset} className="text-xs text-gray-600 hover:text-gray-900 underline">{clearAndNewLabel}</button>
             )}
           </div>
-          <textarea
-            value={rawText}
-            onChange={handleChange}
-            placeholder={placeholder}
-            rows={rawText.length ? Math.min(6, Math.max(2, rawText.split('\n').length + 1)) : 1}
-            className={`w-full px-3 sm:px-4 py-3 sm:py-3.5 rounded-xl border focus:outline-none transition-all duration-200 text-[12px] resize-y min-h-0 whitespace-pre overflow-x-auto ${inputClass}`}
-            aria-label="Video URLs"
-          />
+          <div className="flex flex-col sm:flex-row sm:items-start sm:gap-3">
+            <textarea
+              value={rawText}
+              onChange={handleChange}
+              placeholder={placeholder}
+              rows={rawText.length ? Math.min(6, Math.max(2, rawText.split('\n').length + 1)) : 1}
+              className={`w-full sm:flex-1 min-w-0 px-3 sm:px-4 py-3 sm:py-3.5 rounded-xl border focus:outline-none transition-all duration-200 text-[11px] sm:text-[12px] resize-y min-h-0 whitespace-pre placeholder:text-[10px] sm:placeholder:text-[12px] placeholder:whitespace-nowrap ${inputClass}`}
+              aria-label="Video URLs"
+            />
+            <div className="flex justify-center sm:justify-end sm:shrink-0 sm:pt-3.5 sm:pr-1">
+              {sampleLinkButton}
+            </div>
+          </div>
         </div>
       )}
 
       {links.length > 0 && (
         <div className="space-y-2 max-h-[240px] overflow-y-auto pr-1">
-            {links.map((url) => {
-              const statusId = getStatusId(url);
-              const r = statusId ? (linkToResult.get(statusId) ?? null) : null;
-              const previewThumb = getBulkLinkThumbnail(url, bulkThumbnails);
+            {linkDisplayRows.map(({ url, statusId, r, video, videoIndex, showRemove, rowKey }) => {
+              const previewThumb =
+                (isValidThumbUrl(video?.thumbnail) && video.thumbnail) ||
+                getBulkLinkThumbnail(url, bulkThumbnails) ||
+                (isValidThumbUrl(r?.thumbnail) ? r.thumbnail : null);
               return (
               <div
-                key={statusId || url}
+                key={rowKey}
                 className={`flex flex-nowrap items-center gap-2 sm:gap-3 rounded-lg border px-3 sm:px-4 py-2.5 sm:py-3 transition-colors overflow-hidden ${cardClass}`}
               >
                 <div className="w-14 h-14 sm:w-16 sm:h-16 shrink-0 rounded-lg overflow-hidden bg-gray-100 flex items-center justify-center">
                   {previewThumb ? (
                     <img
-                      key={`${statusId}-${previewThumb}`}
+                      key={`${statusId}-${previewThumb}-${videoIndex}`}
                       src={previewThumb}
                       alt="WBS - X/Twitter video önizleme"
                       width={64}
@@ -787,6 +920,7 @@ export default function BulkDownloadSection({
                           >
                             {linkLabel}
                           </span>
+                          {showRemove && (
                           <button
                             type="button"
                             onClick={() => removeLink(url)}
@@ -795,6 +929,7 @@ export default function BulkDownloadSection({
                           >
                             {removeLabel}
                           </button>
+                          )}
                         </>
                       );
                     }
@@ -803,19 +938,32 @@ export default function BulkDownloadSection({
                     }
                     if (r) {
                       return (
-                        <MetadataIcons
-                          durationSec={r?.metadata?.duration}
-                          likes={r?.metadata?.likes}
-                          retweets={r?.metadata?.retweets}
-                          views={r?.metadata?.views}
-                          created_at={r?.metadata?.created_at}
-                          created_timestamp={r?.metadata?.created_timestamp}
-                        />
+                        <>
+                          <MetadataIcons
+                            durationSec={video?.duration ?? r?.metadata?.duration}
+                            likes={r?.metadata?.likes}
+                            retweets={r?.metadata?.retweets}
+                            views={r?.metadata?.views}
+                            created_at={r?.metadata?.created_at}
+                            created_timestamp={r?.metadata?.created_timestamp}
+                          />
+                          {showRemove && (
+                          <button
+                            type="button"
+                            onClick={() => removeLink(url)}
+                            className={`shrink-0 text-[11px] font-medium px-2.5 py-1.5 rounded-md border transition ${removeClass}`}
+                            aria-label={removeLabel}
+                          >
+                            {removeLabel}
+                          </button>
+                          )}
+                        </>
                       );
                     }
                     return (
                       <>
                         <span className="flex-1 min-w-0" aria-hidden />
+                        {showRemove && (
                         <button
                           type="button"
                           onClick={() => removeLink(url)}
@@ -824,6 +972,7 @@ export default function BulkDownloadSection({
                         >
                           {removeLabel}
                         </button>
+                        )}
                       </>
                     );
                   })()}
@@ -834,10 +983,6 @@ export default function BulkDownloadSection({
         </div>
       )}
 
-      {links.length > 0 && isProcessing && (
-        <p className="text-sm text-gray-500 animate-pulse">{processingLabel}</p>
-      )}
-
       {error && (!(error === bulkSignInRequiredLabel) || analyzeRequested) && (
         <div className={`rounded-xl border px-4 py-3 text-sm ${
           error === rateLimitMessage || error === bulkSignInRequiredLabel
@@ -845,6 +990,12 @@ export default function BulkDownloadSection({
             : 'text-red-700 bg-red-50 border-red-200'
         } ${resultClass}`}>
           {error}
+        </div>
+      )}
+
+      {downloadNotice && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800" role="status">
+          {downloadNotice}
         </div>
       )}
 
@@ -879,7 +1030,11 @@ export default function BulkDownloadSection({
             const isBest = mode === 'best';
             const buttonText = isBest ? downloadVideoLabel : getBandLabel(mode);
             const isPendingThis = pendingDownload?.type === 'quality' && pendingDownload.mode === mode;
+            const isActiveThis = activeDownload?.type === 'quality' && activeDownload.mode === mode;
             const showAnalyzing = isProcessing && isPendingThis;
+            const showDownloading = isBulkDownloading && isActiveThis;
+            const busyLabel = showAnalyzing ? processingLabel : showDownloading ? downloadingLabel : null;
+            const displayText = busyLabel || buttonText;
             return (
             <button
               key={mode}
@@ -889,19 +1044,35 @@ export default function BulkDownloadSection({
                 e.stopPropagation();
                 requestDownload({ type: 'quality', mode });
               }}
-              disabled={isBulkDownloading}
-              className="w-full sm:flex-1 sm:min-w-[80px] flex items-center justify-center gap-1.5 min-h-[44px] px-3 py-3 sm:py-2 rounded-lg font-semibold text-sm transition-colors disabled:cursor-not-allowed bg-green-600 hover:bg-green-700 text-white touch-target"
-              aria-label={showAnalyzing ? processingLabel : buttonText}
+              disabled={buttonsBusy}
+              className="w-full sm:flex-1 sm:min-w-[80px] flex items-center justify-center gap-1.5 min-h-[44px] px-3 py-3 sm:py-2 rounded-lg font-semibold text-sm transition-colors disabled:opacity-70 disabled:cursor-not-allowed bg-green-600 hover:bg-green-700 text-white touch-target"
+              aria-label={displayText}
+              aria-busy={!!busyLabel}
             >
-              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                <polyline points="7 10 12 15 17 10" />
-                <line x1="12" y1="15" x2="12" y2="3" />
-              </svg>
-              {showAnalyzing ? processingLabel : buttonText}
+              {busyLabel ? (
+                <svg className="animate-spin shrink-0" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
+                  <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" opacity="0.25" />
+                  <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                </svg>
+              ) : (
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" y1="15" x2="12" y2="3" />
+                </svg>
+              )}
+              {displayText}
             </button>
             );
           })}
+          {(() => {
+            const isPendingZip = pendingDownload?.type === 'zip';
+            const isActiveZip = activeDownload?.type === 'zip';
+            const showAnalyzingZip = isProcessing && isPendingZip;
+            const showDownloadingZip = isBulkDownloading && isActiveZip;
+            const busyLabelZip = showAnalyzingZip ? processingLabel : showDownloadingZip ? downloadingLabel : null;
+            const displayZip = busyLabelZip || zipOptionLabel;
+            return (
           <button
             type="button"
             onClick={(e) => {
@@ -909,18 +1080,28 @@ export default function BulkDownloadSection({
               e.stopPropagation();
               requestDownload({ type: 'zip' });
             }}
-            disabled={isBulkDownloading}
-            className="w-full sm:flex-1 sm:min-w-[80px] flex items-center justify-center gap-1.5 min-h-[44px] px-3 py-3 sm:py-2 rounded-lg font-semibold text-sm transition-colors disabled:cursor-not-allowed bg-green-600 hover:bg-green-700 text-white touch-target"
-            aria-label={pendingDownload?.type === 'zip' && isProcessing ? processingLabel : zipOptionLabel}
-            title={common.downloadAllAsZipTitle || (lang === 'tr' ? 'Tümünü tek ZIP dosyasında analiz et (izin penceresi çıkmaz)' : lang === 'de' ? 'Alle in einer ZIP-Datei analysieren (ohne Berechtigungsabfrage)' : lang === 'es' ? 'Analizar todo en un archivo ZIP (sin solicitud de permiso)' : 'Analyze all in one ZIP file (no permission prompt)')}
+            disabled={buttonsBusy}
+            className="w-full sm:flex-1 sm:min-w-[80px] flex items-center justify-center gap-1.5 min-h-[44px] px-3 py-3 sm:py-2 rounded-lg font-semibold text-sm transition-colors disabled:opacity-70 disabled:cursor-not-allowed bg-green-600 hover:bg-green-700 text-white touch-target"
+            aria-label={displayZip}
+            aria-busy={!!busyLabelZip}
+            title={common.downloadAllAsZipTitle || (lang === 'tr' ? 'Tümünü tek ZIP dosyasında kaydet (izin penceresi çıkmaz)' : lang === 'de' ? 'Alle in einer ZIP-Datei speichern (ohne Berechtigungsabfrage)' : lang === 'es' ? 'Guardar todo en un archivo ZIP (sin solicitud de permiso)' : 'Save all in one ZIP file (no permission prompt)')}
           >
-            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-              <polyline points="7 10 12 15 17 10" />
-              <line x1="12" y1="15" x2="12" y2="3" />
-            </svg>
-            {pendingDownload?.type === 'zip' && isProcessing ? processingLabel : zipOptionLabel}
+            {busyLabelZip ? (
+              <svg className="animate-spin shrink-0" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
+                <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" opacity="0.25" />
+                <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+            ) : (
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="7 10 12 15 17 10" />
+                <line x1="12" y1="15" x2="12" y2="3" />
+              </svg>
+            )}
+            {displayZip}
           </button>
+            );
+          })()}
         </div>
         <p className="text-xs text-gray-500 mt-2" role="note">
           {browserPermissionHint}
@@ -950,17 +1131,31 @@ export default function BulkDownloadSection({
                       const label = v.label || v.quality || '';
                       const ext = v.mediaType === 'photo' ? (v.ext || 'jpg') : 'mp4';
                       const fileName = buildDownloadFileName(ext);
-                      const proxyUrl = hasValidHref ? `/api/download/file?url=${encodeURIComponent(v.url)}&filename=${encodeURIComponent(fileName)}` : '#';
                       return hasValidHref ? (
                         <a
                           key={i}
-                          href={proxyUrl}
+                          href={v.url}
                           download={fileName}
                           target="_blank"
                           rel="noopener noreferrer"
                           className={`flex items-center justify-center rounded-lg px-4 py-3 sm:py-2.5 min-h-[44px] text-sm font-medium transition-colors ${accentClass}`}
                           title={v.url}
-                          onClick={handleGuestDownloadClick}
+                          onClick={async (e) => {
+                            const video = { ...v, tweetUrl: r.tweetUrl };
+                            if (downloadedPostKeysRef.current.has(getDownloadKey(video))) {
+                              e.preventDefault();
+                              setDownloadNotice(alreadyDownloadedLabel);
+                              return;
+                            }
+                            setDownloadNotice(null);
+                            await handleMediaDownloadClick(e, {
+                              url: v.url,
+                              filename: fileName,
+                              origin: typeof window !== 'undefined' ? window.location.origin : '',
+                              onBefore: handleGuestDownloadClick,
+                            });
+                            markDownloaded(video);
+                          }}
                         >
                           {downloadVideoLabel} {label}
                         </a>

@@ -3,6 +3,7 @@ import { getSessionSafe } from '@/lib/auth.js';
 import { createSupabaseClient, ensureUserInSupabase } from '@/lib/supabase.js';
 import { insertAnalysisLog } from '@/lib/analysis-log.js';
 import { getClientIp, getUserAgent } from '@/lib/request-client.js';
+import { canonicalizeTweetUrl, extractTweetId, isAnonymousTweetPath } from '@/lib/tweet-url.js';
 
 /** WBS: Sadece analysis_logs tablosu (UNRESTRICTED). analysis_history tablosu kullanılmaz. */
 const TABLE_NAME = 'analysis_logs';
@@ -21,6 +22,20 @@ async function getSessionAndEnsureUser() {
 function getHistoryUserId(session) {
   if (!session?.user) return null;
   return session.user.id || session.user.email || null;
+}
+
+function canonicalizeUrlsForSave(urls, results) {
+  return urls.map((url, index) => {
+    const statusId = extractTweetId(url);
+    const result =
+      results[index] ||
+      (statusId ? results.find((row) => extractTweetId(row?.tweetUrl) === statusId) : null);
+    const fromResult = typeof result?.tweetUrl === 'string' ? result.tweetUrl.trim().split('?')[0] : '';
+    if (fromResult && !isAnonymousTweetPath(fromResult)) return fromResult;
+    const author = result?.metadata?.author_screen_name;
+    const canonical = canonicalizeTweetUrl(url, author);
+    return canonical || url;
+  });
 }
 
 const NO_STORE = { headers: { 'Cache-Control': 'private, no-store' } };
@@ -100,7 +115,10 @@ export async function POST(request) {
       return NextResponse.json({ ok: false, error: 'SUPABASE_NOT_CONFIGURED', code: 'NO_CLIENT' }, { status: 503 });
     }
 
-    const urls = Array.isArray(body?.urls) ? body.urls : [];
+    const urls = canonicalizeUrlsForSave(
+      Array.isArray(body?.urls) ? body.urls : [],
+      Array.isArray(body?.results) ? body.results : []
+    );
     const results = Array.isArray(body?.results) ? body.results : [];
     const language = typeof body?.language === 'string' ? body.language.toUpperCase().slice(0, 2) : null;
     if (urls.length === 0) {
