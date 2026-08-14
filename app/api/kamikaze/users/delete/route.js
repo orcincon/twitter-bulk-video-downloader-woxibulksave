@@ -45,13 +45,17 @@ export async function POST(request) {
     ? body.user_ids.filter((id) => typeof id === 'string' && id.length > 0)
     : [];
   if (userIds.length === 0) {
-    return NextResponse.json({ ok: true, deleted: 0 });
+    return NextResponse.json({ ok: true, deleted: 0, mode: 'hard' });
   }
 
-  const { error: logsError } = await supabase.from('analysis_logs').delete().in('user_id', userIds);
-  if (logsError) {
-    console.warn('[kamikaze/users/delete] logs', logsError);
-    return NextResponse.json({ error: 'DELETE_FAILED' }, { status: 500 });
+  const mode = body.mode === 'soft' ? 'soft' : 'hard';
+
+  if (mode === 'hard') {
+    const { error: logsError } = await supabase.from('analysis_logs').delete().in('user_id', userIds);
+    if (logsError) {
+      console.warn('[kamikaze/users/delete] logs', logsError);
+      return NextResponse.json({ error: 'DELETE_FAILED' }, { status: 500 });
+    }
   }
 
   const { error: usersError } = await supabase.from('users').delete().in('id', userIds);
@@ -60,5 +64,5 @@ export async function POST(request) {
     return NextResponse.json({ error: 'DELETE_FAILED' }, { status: 500 });
   }
 
-  return NextResponse.json({ ok: true, deleted: userIds.length });
+  return NextResponse.json({ ok: true, deleted: userIds.length, mode });
 }

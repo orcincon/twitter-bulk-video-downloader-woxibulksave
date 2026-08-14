@@ -31,12 +31,34 @@ export async function POST(request) {
   const logIds = Array.isArray(body.log_ids) ? body.log_ids : [];
   const ids = logIds.filter((id) => typeof id === 'string' && id.length > 0);
   if (ids.length === 0) {
-    return NextResponse.json({ ok: true, deleted: 0 });
+    return NextResponse.json({ ok: true, deleted: 0, mode: 'hard' });
   }
 
   const supabase = createSupabaseClient();
   if (!supabase) {
     return NextResponse.json({ error: 'SUPABASE_NOT_CONFIGURED' }, { status: 503 });
+  }
+
+  const mode = body.mode === 'soft' || body.mode === 'restore' ? body.mode : 'hard';
+
+  if (mode === 'soft' || mode === 'restore') {
+    const { error } = await supabase
+      .from('analysis_logs')
+      .update({ admin_hidden: mode === 'restore' ? false : true })
+      .in('id', ids);
+    if (error) {
+      const message = String(error.message || '');
+      const missingColumn =
+        error.code === 'PGRST204' ||
+        /column .* does not exist/i.test(message) ||
+        /Could not find the '.*' column/.test(message);
+      if (missingColumn) {
+        return NextResponse.json({ error: 'ADMIN_HIDDEN_COLUMN_MISSING' }, { status: 400 });
+      }
+      console.warn('[kamikaze/logs/delete] soft', error);
+      return NextResponse.json({ error: 'DELETE_FAILED' }, { status: 500 });
+    }
+    return NextResponse.json({ ok: true, deleted: ids.length, mode });
   }
 
   const { error } = await supabase.from('analysis_logs').delete().in('id', ids);
@@ -45,5 +67,5 @@ export async function POST(request) {
     return NextResponse.json({ error: 'DELETE_FAILED' }, { status: 500 });
   }
 
-  return NextResponse.json({ ok: true, deleted: ids.length });
+  return NextResponse.json({ ok: true, deleted: ids.length, mode: 'hard' });
 }

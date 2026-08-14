@@ -15,6 +15,11 @@ function makeToken(email, secret) {
   return createHash('sha256').update(`${email || ''}:${secret}`).digest('hex');
 }
 
+function isMissingColumnError(error) {
+  const message = String(error?.message || '');
+  return error?.code === 'PGRST204' || /column .* does not exist/i.test(message) || /Could not find the '.*' column/.test(message);
+}
+
 function linkCountFromLog(log) {
   if (Array.isArray(log?.urls) && log.urls.length > 0) return log.urls.length;
   if (typeof log?.link_count === 'number' && log.link_count > 0) return log.link_count;
@@ -25,14 +30,25 @@ async function sumAnalysisLinkCount(supabase) {
   const pageSize = 1000;
   let from = 0;
   let total = 0;
+  let filterAdminHidden = true;
 
   while (true) {
-    const { data, error } = await supabase
+    let query = supabase
       .from('analysis_logs')
       .select('link_count, urls')
       .range(from, from + pageSize - 1);
+    if (filterAdminHidden) query = query.eq('admin_hidden', false);
 
-    if (error) return { total: null, error };
+    const { data, error } = await query;
+    if (error) {
+      if (filterAdminHidden && isMissingColumnError(error)) {
+        filterAdminHidden = false;
+        from = 0;
+        total = 0;
+        continue;
+      }
+      return { total: null, error };
+    }
     if (!data?.length) break;
 
     for (const row of data) total += linkCountFromLog(row);
@@ -43,19 +59,31 @@ async function sumAnalysisLinkCount(supabase) {
   return { total, error: null };
 }
 
-async function fetchAllAnalysisLogs(supabase) {
+async function fetchAllAnalysisLogs(supabase, { hiddenOnly = false } = {}) {
   const pageSize = 1000;
   let from = 0;
   const all = [];
+  let filterAdminHidden = true;
 
   while (true) {
-    const { data, error } = await supabase
+    let query = supabase
       .from('analysis_logs')
       .select('id, user_id, urls, results_json, created_at, video_count, link_count')
       .order('created_at', { ascending: false })
       .range(from, from + pageSize - 1);
+    if (filterAdminHidden) query = query.eq('admin_hidden', hiddenOnly);
 
-    if (error) throw error;
+    const { data, error } = await query;
+    if (error) {
+      if (filterAdminHidden && isMissingColumnError(error)) {
+        if (hiddenOnly) return { logs: [], columnMissing: true };
+        filterAdminHidden = false;
+        from = 0;
+        all.length = 0;
+        continue;
+      }
+      throw error;
+    }
     if (!data?.length) break;
 
     all.push(...data);
@@ -63,7 +91,7 @@ async function fetchAllAnalysisLogs(supabase) {
     from += pageSize;
   }
 
-  return all;
+  return { logs: all, columnMissing: false };
 }
 
 function expandRecentLogs(rawLogs, resolveUserLabel) {
@@ -214,18 +242,23 @@ export async function GET(request) {
     ? searchParams.get('sortBy')
     : 'created_at';
   const sortDir = searchParams.get('sortDir') === 'asc' ? 'asc' : 'desc';
+  const hiddenOnly = searchParams.get('hidden') === '1';
 
   try {
-    const [linkSumRes, usersRes, tokenUsersRes, allUsersRes, rawLogs] = await Promise.all([
-      sumAnalysisLinkCount(supabase),
+    const [linkSumRes, usersRes, tokenUsersRes, allUsersRes, logsFetch] = await Promise.all([
+      hiddenOnly ? Promise.resolve({ total: 0, error: null }) : sumAnalysisLinkCount(supabase),
       supabase.from('users').select('id', { count: 'exact', head: true }),
-      supabase
-        .from('users')
-        .select('id', { count: 'exact', head: true })
-        .not('access_token', 'is', null),
+      hiddenOnly
+        ? Promise.resolve({ count: 0 })
+        : supabase
+            .from('users')
+            .select('id', { count: 'exact', head: true })
+            .not('access_token', 'is', null),
       supabase.from('users').select('id, name, email, username'),
-      fetchAllAnalysisLogs(supabase),
+      fetchAllAnalysisLogs(supabase, { hiddenOnly }),
     ]);
+    const rawLogs = logsFetch.logs ?? [];
+    const columnMissing = Boolean(logsFetch.columnMissing);
 
     let usersForLookup = allUsersRes;
     if (allUsersRes.error) {
@@ -322,6 +355,8 @@ export async function GET(request) {
       pageSize,
       totalPages,
       usernameOptions,
+      hidden: hiddenOnly,
+      columnMissing,
     });
   } catch (err) {
     console.warn('[kamikaze/stats]', err);

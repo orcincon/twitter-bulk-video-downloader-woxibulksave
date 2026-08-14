@@ -4,6 +4,7 @@ import { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
 import { formatBucketLabel } from '@/lib/visitor-stats.js';
 import ConfirmToast from '@/components/ConfirmToast.js';
+import { extractTweetId } from '@/lib/tweet-url.js';
 
 function compareSortValues(a, b, dir) {
   const mul = dir === 'asc' ? 1 : -1;
@@ -89,6 +90,19 @@ const DAILY_SORT_GETTERS = {
   totalVisits: (r) => r.totalVisits ?? 0,
 };
 
+const GONE_LIVE_STATUSES = new Set(['tweet_deleted', 'account_deleted', 'suspended', 'missing']);
+
+const LIVE_STATUS_STYLES = {
+  ok: 'bg-green-50 text-green-700',
+  tweet_deleted: 'bg-amber-50 text-amber-800',
+  account_deleted: 'bg-red-50 text-red-700',
+  suspended: 'bg-red-50 text-red-700',
+  private: 'bg-gray-100 text-gray-600',
+  missing: 'bg-amber-50 text-amber-800',
+  unknown: 'bg-gray-100 text-gray-500',
+  invalid: 'bg-gray-100 text-gray-500',
+};
+
 export default function KamikazePage() {
   const [status, setStatus] = useState('loading'); // 'loading' | 'login' | 'dashboard' | 'error' | 'not_configured'
   const [email, setEmail] = useState('');
@@ -108,7 +122,7 @@ export default function KamikazePage() {
   const [logsPage, setLogsPage] = useState(1);
   const [logsPagination, setLogsPagination] = useState({ page: 1, pageSize: 100, totalPages: 1, totalRecentRows: 0 });
   const [logUsernameOptions, setLogUsernameOptions] = useState([]);
-  const [activeTab, setActiveTab] = useState('stats'); // 'stats' | 'users' | 'visitors' | 'daily'
+  const [activeTab, setActiveTab] = useState('stats'); // 'stats' | 'users' | 'visitors' | 'daily' | 'hidden'
   const [users, setUsers] = useState([]);
   const [guests, setGuests] = useState([]);
   const [loadingUsers, setLoadingUsers] = useState(false);
@@ -133,18 +147,33 @@ export default function KamikazePage() {
   });
   const [loadingVisitors, setLoadingVisitors] = useState(false);
   const [confirmDialog, setConfirmDialog] = useState(null);
+  const [previewImage, setPreviewImage] = useState(null);
+  const [hiddenLogs, setHiddenLogs] = useState([]);
+  const [loadingHidden, setLoadingHidden] = useState(false);
+  const [hiddenPage, setHiddenPage] = useState(1);
+  const [hiddenPagination, setHiddenPagination] = useState({ page: 1, pageSize: 100, totalPages: 1, totalRecentRows: 0 });
+  const [hiddenSort, setHiddenSort] = useState({ field: 'created_at', dir: 'desc' });
+  const [hiddenUsernameFilter, setHiddenUsernameFilter] = useState('');
+  const [hiddenUsernameFilterMode, setHiddenUsernameFilterMode] = useState('include');
+  const [hiddenUsernameOptions, setHiddenUsernameOptions] = useState([]);
+  const [selectedHiddenRowIds, setSelectedHiddenRowIds] = useState(new Set());
+  const [hiddenColumnMissing, setHiddenColumnMissing] = useState(false);
+  const [liveStatusByTweetId, setLiveStatusByTweetId] = useState({});
+  const [checkingLiveStatus, setCheckingLiveStatus] = useState(false);
+  const [liveStatusFilter, setLiveStatusFilter] = useState('all');
+  const [liveCheckProgress, setLiveCheckProgress] = useState({ done: 0, total: 0 });
 
-  const openConfirm = (message, onConfirm) => {
-    setConfirmDialog({ message, onConfirm });
+  const openConfirm = (dialog) => {
+    setConfirmDialog(dialog);
   };
 
   const closeConfirm = () => {
     setConfirmDialog(null);
   };
 
-  const handleConfirmAction = async () => {
-    if (!confirmDialog?.onConfirm) return;
-    await confirmDialog.onConfirm();
+  const runConfirmAction = async (fn) => {
+    if (!fn) return;
+    await fn();
     closeConfirm();
   };
 
@@ -204,6 +233,62 @@ export default function KamikazePage() {
   useEffect(() => {
     if (activeTab === 'stats') loadStats(logsPage);
   }, [activeTab, logsPage, logsUsernameFilter, logsUsernameFilterMode, logsSort]);
+
+  const loadHiddenLogs = async (page = hiddenPage) => {
+    setLoadingHidden(true);
+    try {
+      const params = new URLSearchParams({
+        page: String(page),
+        pageSize: '100',
+        hidden: '1',
+      });
+      const filterNorm = hiddenUsernameFilter.trim().replace(/^@+/, '');
+      if (filterNorm) {
+        params.set('username', filterNorm);
+        params.set('usernameMode', hiddenUsernameFilterMode);
+      }
+      params.set('sortBy', hiddenSort.field);
+      params.set('sortDir', hiddenSort.dir);
+
+      const res = await fetch(`/api/kamikaze/stats?${params.toString()}`, { credentials: 'include' });
+      if (res.status === 401) {
+        setStatus('login');
+        return;
+      }
+      if (!res.ok) {
+        setActionError('Soft silinenler yüklenemedi.');
+        return;
+      }
+      const data = await res.json();
+      setHiddenLogs(data.recentLogs ?? []);
+      setHiddenPagination({
+        page: data.page ?? page,
+        pageSize: data.pageSize ?? 100,
+        totalPages: data.totalPages ?? 1,
+        totalRecentRows: data.totalRecentRows ?? 0,
+      });
+      setHiddenUsernameOptions(data.usernameOptions ?? []);
+      setHiddenColumnMissing(Boolean(data.columnMissing));
+      if ((data.page ?? page) !== page) setHiddenPage(data.page ?? page);
+    } catch {
+      setActionError('Bağlantı hatası.');
+    } finally {
+      setLoadingHidden(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'hidden') loadHiddenLogs(hiddenPage);
+  }, [activeTab, hiddenPage, hiddenUsernameFilter, hiddenUsernameFilterMode, hiddenSort]);
+
+  useEffect(() => {
+    if (!previewImage) return undefined;
+    const onKey = (event) => {
+      if (event.key === 'Escape') setPreviewImage(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [previewImage]);
 
   const loadUsers = async () => {
     setLoadingUsers(true);
@@ -289,8 +374,14 @@ export default function KamikazePage() {
     if (activeTab === 'stats') {
       setSelectedUserIds(new Set());
       setSelectedGuestIps(new Set());
+      setSelectedHiddenRowIds(new Set());
     } else if (activeTab === 'users') {
       setSelectedRowIds(new Set());
+      setSelectedHiddenRowIds(new Set());
+    } else if (activeTab === 'hidden') {
+      setSelectedRowIds(new Set());
+      setSelectedUserIds(new Set());
+      setSelectedGuestIps(new Set());
     }
   }, [activeTab]);
 
@@ -347,7 +438,14 @@ export default function KamikazePage() {
     });
   };
 
-  const filteredRecentLogs = stats.recentLogs;
+  const filteredRecentLogs = useMemo(() => {
+    if (liveStatusFilter !== 'gone') return stats.recentLogs;
+    return stats.recentLogs.filter((row) => {
+      const tweetId = extractTweetId(row.url);
+      const status = tweetId ? liveStatusByTweetId[tweetId]?.status : null;
+      return GONE_LIVE_STATUSES.has(status);
+    });
+  }, [stats.recentLogs, liveStatusFilter, liveStatusByTweetId]);
 
   const sortedUsers = useMemo(() => sortRows(users, usersSort, USER_SORT_GETTERS), [users, usersSort]);
   const sortedGuests = useMemo(() => sortRows(guests, guestsSort, GUEST_SORT_GETTERS), [guests, guestsSort]);
@@ -386,7 +484,7 @@ export default function KamikazePage() {
     });
   };
 
-  const deleteLogs = async (logIds) => {
+  const deleteLogs = async (logIds, mode = 'hard') => {
     if (!logIds.length) return;
     setDeleting(true);
     setActionError('');
@@ -394,18 +492,32 @@ export default function KamikazePage() {
       const res = await fetch('/api/kamikaze/logs/delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ log_ids: logIds }),
+        body: JSON.stringify({ log_ids: logIds, mode }),
         credentials: 'include',
       });
       const data = await res.json().catch(() => ({}));
+      if (res.status === 400 && data.error === 'ADMIN_HIDDEN_COLUMN_MISSING') {
+        setActionError("Önce Supabase'de analysis_logs.admin_hidden kolonunu ekleyin (017_analysis_logs_admin_hidden.sql).");
+        return;
+      }
       if (res.ok && data.ok) {
         setSelectedRowIds(new Set());
-        const nextPage =
-          stats.recentLogs.length <= 1 && logsPage > 1 ? logsPage - 1 : logsPage;
-        if (nextPage !== logsPage) setLogsPage(nextPage);
-        else await loadStats(logsPage);
+        setSelectedHiddenRowIds(new Set());
+        if (activeTab === 'hidden') {
+          const nextPage =
+            hiddenLogs.length <= 1 && hiddenPage > 1 ? hiddenPage - 1 : hiddenPage;
+          if (nextPage !== hiddenPage) setHiddenPage(nextPage);
+          else await loadHiddenLogs(hiddenPage);
+        } else {
+          const nextPage =
+            stats.recentLogs.length <= 1 && logsPage > 1 ? logsPage - 1 : logsPage;
+          if (nextPage !== logsPage) setLogsPage(nextPage);
+          else await loadStats(logsPage);
+        }
       } else {
-        setActionError('Analiz silinemedi.');
+        setActionError(
+          mode === 'soft' ? 'Analiz gizlenemedi.' : mode === 'restore' ? 'Analiz geri alınamadı.' : 'Analiz silinemedi.'
+        );
       }
     } catch {
       setActionError('Bağlantı hatası.');
@@ -415,13 +527,157 @@ export default function KamikazePage() {
   };
 
   const handleDeleteRow = (row) => {
-    openConfirm('Bu kayıt silinecek. Emin misiniz?', () => deleteLogs([row.log_id]));
+    openConfirm({
+      message: 'Bu kayıt kamikaze listesinden kaldırılacak.',
+      detail: 'Soft sil kullanıcının arşivini korur.\nKalıcı sil kaydı arşivden de siler.',
+      onSoftConfirm: () => deleteLogs([row.log_id], 'soft'),
+      onHardConfirm: () => deleteLogs([row.log_id], 'hard'),
+    });
   };
 
   const handleBulkDelete = () => {
     const logIds = [...new Set(stats.recentLogs.filter((r) => selectedRowIds.has(r.id)).map((r) => r.log_id))];
     if (!logIds.length) return;
-    openConfirm(`${logIds.length} analiz silinecek. Emin misiniz?`, () => deleteLogs(logIds));
+    openConfirm({
+      message: `${logIds.length} analiz kamikaze listesinden kaldırılacak.`,
+      detail: 'Soft sil kullanıcı arşivlerini korur.\nKalıcı sil kayıtları arşivden de siler.',
+      onSoftConfirm: () => deleteLogs(logIds, 'soft'),
+      onHardConfirm: () => deleteLogs(logIds, 'hard'),
+    });
+  };
+
+  const liveStatusCounts = useMemo(() => {
+    let gone = 0;
+    let checked = 0;
+    for (const row of stats.recentLogs) {
+      const tweetId = extractTweetId(row.url);
+      const st = tweetId ? liveStatusByTweetId[tweetId] : null;
+      if (!st) continue;
+      checked += 1;
+      if (GONE_LIVE_STATUSES.has(st.status)) gone += 1;
+    }
+    return { gone, checked };
+  }, [stats.recentLogs, liveStatusByTweetId]);
+
+  const checkLiveStatus = async () => {
+    const source =
+      selectedRowIds.size > 0
+        ? filteredRecentLogs.filter((row) => selectedRowIds.has(row.id))
+        : filteredRecentLogs;
+    const items = [];
+    const seen = new Set();
+    for (const row of source) {
+      if (!row.url) continue;
+      const tweetId = extractTweetId(row.url);
+      if (!tweetId || seen.has(tweetId)) continue;
+      seen.add(tweetId);
+      items.push({ url: row.url, username: row.user_username || '' });
+    }
+    if (!items.length) {
+      setActionError('Kontrol edilecek gönderi yok.');
+      return;
+    }
+
+    setCheckingLiveStatus(true);
+    setActionError('');
+    setLiveCheckProgress({ done: 0, total: items.length });
+    const chunkSize = 12;
+    try {
+      for (let i = 0; i < items.length; i += chunkSize) {
+        const chunk = items.slice(i, i + chunkSize);
+        const res = await fetch('/api/kamikaze/logs/live-status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ items: chunk }),
+          credentials: 'include',
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.status === 401) {
+          setStatus('login');
+          return;
+        }
+        if (!res.ok || !data.ok) {
+          setActionError('Gönderi durumu kontrol edilemedi.');
+          return;
+        }
+        setLiveStatusByTweetId((prev) => ({ ...prev, ...(data.results || {}) }));
+        setLiveCheckProgress({ done: Math.min(i + chunk.length, items.length), total: items.length });
+      }
+    } catch {
+      setActionError('Bağlantı hatası.');
+    } finally {
+      setCheckingLiveStatus(false);
+    }
+  };
+
+  const allHiddenLogsSelected =
+    hiddenLogs.length > 0 && hiddenLogs.every((r) => selectedHiddenRowIds.has(r.id));
+
+  const toggleHiddenRow = (rowId) => {
+    setSelectedHiddenRowIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(rowId)) next.delete(rowId);
+      else next.add(rowId);
+      return next;
+    });
+  };
+
+  const toggleAllHidden = () => {
+    setSelectedHiddenRowIds((prev) => {
+      if (hiddenLogs.length === 0) return prev;
+      if (hiddenLogs.every((r) => prev.has(r.id))) {
+        const next = new Set(prev);
+        hiddenLogs.forEach((r) => next.delete(r.id));
+        return next;
+      }
+      const next = new Set(prev);
+      hiddenLogs.forEach((r) => next.add(r.id));
+      return next;
+    });
+  };
+
+  const selectedHiddenLogIds = () =>
+    [...new Set(hiddenLogs.filter((r) => selectedHiddenRowIds.has(r.id)).map((r) => r.log_id))];
+
+  const handleRestoreHiddenRow = (row) => {
+    openConfirm({
+      message: 'Bu kayıt istatistiklere geri alınacak.',
+      confirmLabel: 'Geri al',
+      onConfirm: () => deleteLogs([row.log_id], 'restore'),
+    });
+  };
+
+  const handleHardDeleteHiddenRow = (row) => {
+    openConfirm({
+      message: 'Bu kayıt kalıcı olarak silinecek. Kullanıcının arşivinden de gider.',
+      confirmLabel: 'Kalıcı sil',
+      onConfirm: () => deleteLogs([row.log_id], 'hard'),
+    });
+  };
+
+  const handleBulkRestoreHidden = () => {
+    const logIds = selectedHiddenLogIds();
+    if (!logIds.length) return;
+    openConfirm({
+      message: `${logIds.length} kayıt istatistiklere geri alınacak.`,
+      confirmLabel: 'Geri al',
+      onConfirm: () => deleteLogs(logIds, 'restore'),
+    });
+  };
+
+  const handleBulkHardDeleteHidden = () => {
+    const logIds = selectedHiddenLogIds();
+    if (!logIds.length) return;
+    openConfirm({
+      message: `${logIds.length} kayıt kalıcı olarak silinecek. Kullanıcı arşivlerinden de gider.`,
+      confirmLabel: 'Kalıcı sil',
+      onConfirm: () => deleteLogs(logIds, 'hard'),
+    });
+  };
+
+  const handleHiddenSort = (field) => {
+    setHiddenSort((prev) => nextSortState(prev, field));
+    setHiddenPage(1);
   };
 
   const toggleSetItem = (setter, key) => {
@@ -443,7 +699,7 @@ export default function KamikazePage() {
     }
   };
 
-  const deleteUsers = async (userIds) => {
+  const deleteUsers = async (userIds, mode = 'hard') => {
     if (!userIds.length) return;
     setDeletingUsers(true);
     setActionError('');
@@ -451,7 +707,7 @@ export default function KamikazePage() {
       const res = await fetch('/api/kamikaze/users/delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_ids: userIds }),
+        body: JSON.stringify({ user_ids: userIds, mode }),
         credentials: 'include',
       });
       const data = await res.json().catch(() => ({}));
@@ -469,13 +725,23 @@ export default function KamikazePage() {
   };
 
   const handleDeleteUser = (user) => {
-    openConfirm(`"${user.email || user.id}" kullanıcısı ve analiz geçmişi silinecek. Emin misiniz?`, () => deleteUsers([user.id]));
+    openConfirm({
+      message: `"${user.email || user.id}" kullanıcısı silinecek.`,
+      detail: 'Soft sil: kullanıcı listeden kalkar, arşivi kalır.\nKalıcı sil: kullanıcı ve arşivi tamamen silinir.',
+      onSoftConfirm: () => deleteUsers([user.id], 'soft'),
+      onHardConfirm: () => deleteUsers([user.id], 'hard'),
+    });
   };
 
   const handleBulkDeleteUsers = () => {
     const userIds = [...selectedUserIds];
     if (!userIds.length) return;
-    openConfirm(`${userIds.length} kullanıcı ve analiz geçmişleri silinecek. Emin misiniz?`, () => deleteUsers(userIds));
+    openConfirm({
+      message: `${userIds.length} kullanıcı silinecek.`,
+      detail: 'Soft sil: kullanıcılar listeden kalkar, arşivleri kalır.\nKalıcı sil: kullanıcılar ve arşivleri tamamen silinir.',
+      onSoftConfirm: () => deleteUsers(userIds, 'soft'),
+      onHardConfirm: () => deleteUsers(userIds, 'hard'),
+    });
   };
 
   const handleSyncUsernames = async () => {
@@ -551,13 +817,19 @@ export default function KamikazePage() {
   };
 
   const handleDeleteGuest = (guest) => {
-    openConfirm(`${guest.client_ip} IP adresine ait misafir analizleri silinecek. Emin misiniz?`, () => deleteGuests([guest.client_ip]));
+    openConfirm({
+      message: `${guest.client_ip} IP adresine ait misafir analizleri silinecek. Emin misiniz?`,
+      onConfirm: () => deleteGuests([guest.client_ip]),
+    });
   };
 
   const handleBulkDeleteGuests = () => {
     const clientIps = [...selectedGuestIps];
     if (!clientIps.length) return;
-    openConfirm(`${clientIps.length} misafir IP kaydı ve ilgili analizler silinecek. Emin misiniz?`, () => deleteGuests(clientIps));
+    openConfirm({
+      message: `${clientIps.length} misafir IP kaydı ve ilgili analizler silinecek. Emin misiniz?`,
+      onConfirm: () => deleteGuests(clientIps),
+    });
   };
 
   const renderBulkActions = (selectedCount, onDelete, deletingFlag, label) => {
@@ -591,6 +863,31 @@ export default function KamikazePage() {
             }`}
             aria-label={`Sayfa ${pageNum}`}
             aria-current={pageNum === logsPagination.page ? 'page' : undefined}
+          >
+            {pageNum}
+          </button>
+        ))}
+      </div>
+    );
+  };
+
+  const renderHiddenPagination = () => {
+    if (hiddenPagination.totalPages <= 1) return null;
+    return (
+      <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
+        {Array.from({ length: hiddenPagination.totalPages }, (_, i) => i + 1).map((pageNum) => (
+          <button
+            key={pageNum}
+            type="button"
+            onClick={() => setHiddenPage(pageNum)}
+            disabled={loadingHidden}
+            className={`min-w-[2rem] px-2.5 py-1 text-sm font-medium rounded-lg border transition disabled:opacity-50 ${
+              pageNum === hiddenPagination.page
+                ? 'border-[#1d9bf0] bg-[#1d9bf0] text-white'
+                : 'border-gray-200 text-gray-700 hover:bg-gray-50'
+            }`}
+            aria-label={`Sayfa ${pageNum}`}
+            aria-current={pageNum === hiddenPagination.page ? 'page' : undefined}
           >
             {pageNum}
           </button>
@@ -708,7 +1005,7 @@ export default function KamikazePage() {
       </header>
 
       <nav className="bg-white border-b border-[#1d9bf0]/30">
-        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 flex gap-0 sm:gap-1">
+        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 flex gap-0 sm:gap-1 overflow-x-auto">
           <button
             type="button"
             onClick={() => setActiveTab('stats')}
@@ -736,6 +1033,13 @@ export default function KamikazePage() {
             className={`px-3 sm:px-5 lg:px-6 py-3 sm:py-3.5 text-sm lg:text-base font-medium border-b-2 transition whitespace-nowrap ${activeTab === 'daily' ? 'border-[#1d9bf0] text-[#1d9bf0]' : 'border-transparent text-gray-600 hover:text-gray-900'}`}
           >
             Günlük ziyaretçi
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('hidden')}
+            className={`px-3 sm:px-5 lg:px-6 py-3 sm:py-3.5 text-sm lg:text-base font-medium border-b-2 transition whitespace-nowrap ${activeTab === 'hidden' ? 'border-[#1d9bf0] text-[#1d9bf0]' : 'border-transparent text-gray-600 hover:text-gray-900'}`}
+          >
+            Soft silinenler
           </button>
         </div>
       </nav>
@@ -852,6 +1156,32 @@ export default function KamikazePage() {
                       {allFilteredLogsSelected ? 'Seçimi kaldır' : 'Tümünü seç'}
                     </button>
                   )}
+                  <button
+                    type="button"
+                    onClick={checkLiveStatus}
+                    disabled={checkingLiveStatus || filteredRecentLogs.length === 0}
+                    className="px-3 py-1.5 text-sm font-medium rounded-lg border border-[#1d9bf0]/40 text-[#1d9bf0] hover:bg-[#1d9bf0]/5 disabled:opacity-50"
+                    title={selectedRowIds.size > 0 ? 'Seçilen gönderileri X üzerinde kontrol et' : 'Bu sayfadaki gönderileri X üzerinde kontrol et'}
+                  >
+                    {checkingLiveStatus
+                      ? `Taranıyor ${liveCheckProgress.done}/${liveCheckProgress.total}`
+                      : selectedRowIds.size > 0
+                        ? `Silinmişleri tara (${selectedRowIds.size})`
+                        : 'Silinmişleri tara'}
+                  </button>
+                  {liveStatusCounts.checked > 0 && (
+                    <label className="flex items-center gap-2 min-w-0">
+                      <span className="sr-only">Durum filtresi</span>
+                      <select
+                        value={liveStatusFilter}
+                        onChange={(e) => setLiveStatusFilter(e.target.value)}
+                        className="w-[9.5rem] sm:w-40 max-w-full px-2.5 py-1.5 text-sm rounded-lg border border-gray-200 bg-white text-gray-800 focus:outline-none focus:ring-2 focus:ring-[#1d9bf0]/30 focus:border-[#1d9bf0]"
+                      >
+                        <option value="all">Tüm durumlar</option>
+                        <option value="gone">Silinmiş / askıda ({liveStatusCounts.gone})</option>
+                      </select>
+                    </label>
+                  )}
                   {renderBulkActions(selectedRowIds.size, handleBulkDelete, deleting, 'Seçilenleri sil')}
                 </div>
               </div>
@@ -869,6 +1199,7 @@ export default function KamikazePage() {
                         />
                       </th>
                       <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium">Önizleme</th>
+                      <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium w-28">Durum</th>
                       <SortableTh
                         label="X"
                         field="user"
@@ -904,12 +1235,14 @@ export default function KamikazePage() {
                   <tbody>
                     {stats.recentLogs.length === 0 ? (
                       <tr>
-                        <td colSpan={7} className="px-4 lg:px-8 py-12 text-center text-gray-500">Henüz kayıt yok.</td>
+                        <td colSpan={8} className="px-4 lg:px-8 py-12 text-center text-gray-500">Henüz kayıt yok.</td>
                       </tr>
                     ) : filteredRecentLogs.length === 0 ? (
                       <tr>
-                        <td colSpan={7} className="px-4 lg:px-8 py-12 text-center text-gray-500">
-                          {logsUsernameFilterMode === 'exclude'
+                        <td colSpan={8} className="px-4 lg:px-8 py-12 text-center text-gray-500">
+                          {liveStatusFilter === 'gone'
+                            ? 'Bu sayfada silinmiş veya askıdaki gönderi yok. Önce taramayı çalıştırın.'
+                            : logsUsernameFilterMode === 'exclude'
                             ? 'Hariç tutulan kullanıcı dışında kayıt bulunamadı.'
                             : 'Bu kullanıcı adına ait kayıt bulunamadı.'}
                         </td>
@@ -928,10 +1261,31 @@ export default function KamikazePage() {
                           </td>
                           <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 align-middle">
                             {row.thumbnail ? (
-                              <img src={row.thumbnail} alt="" className="w-12 h-12 sm:w-14 sm:h-14 lg:w-16 lg:h-16 rounded-lg object-cover bg-gray-100 shrink-0" />
+                              <button
+                                type="button"
+                                onClick={() => setPreviewImage(row.thumbnail)}
+                                className="block rounded-lg overflow-hidden focus:outline-none focus-visible:ring-2 focus-visible:ring-[#1d9bf0]"
+                                title="Önizlemeyi büyüt"
+                                aria-label="Önizlemeyi büyüt"
+                              >
+                                <img src={row.thumbnail} alt="" className="w-12 h-12 sm:w-14 sm:h-14 lg:w-16 lg:h-16 rounded-lg object-cover bg-gray-100 shrink-0 hover:opacity-90 cursor-zoom-in" />
+                              </button>
                             ) : (
                               <span className="w-12 h-12 sm:w-14 sm:h-14 lg:w-16 lg:h-16 rounded-lg bg-gray-200 flex items-center justify-center text-gray-400 text-xs shrink-0">—</span>
                             )}
+                          </td>
+                          <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 align-middle">
+                            {(() => {
+                              const tweetId = extractTweetId(row.url);
+                              const st = tweetId ? liveStatusByTweetId[tweetId] : null;
+                              if (!st) return <span className="text-gray-400">—</span>;
+                              const cls = LIVE_STATUS_STYLES[st.status] || LIVE_STATUS_STYLES.unknown;
+                              return (
+                                <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-semibold whitespace-nowrap ${cls}`}>
+                                  {st.label}
+                                </span>
+                              );
+                            })()}
                           </td>
                           <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 text-xs truncate max-w-[90px] sm:max-w-[160px] align-middle">
                             {row.user_username ? (
@@ -976,7 +1330,7 @@ export default function KamikazePage() {
                               onClick={() => handleDeleteRow(row)}
                               disabled={deleting}
                               className="p-1.5 rounded text-red-600 hover:bg-red-50 disabled:opacity-50"
-                              title="Bu kaydı sil"
+                              title="Kaydı sil (soft veya kalıcı)"
                               aria-label="Sil"
                             >
                               <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
@@ -1148,7 +1502,7 @@ export default function KamikazePage() {
                                 onClick={() => handleDeleteUser(u)}
                                 disabled={deletingUsers}
                                 className="p-1.5 rounded text-red-600 hover:bg-red-50 disabled:opacity-50"
-                                title="Kullanıcıyı sil"
+                                title="Kullanıcıyı sil (soft veya kalıcı)"
                                 aria-label="Sil"
                               >
                                 <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
@@ -1511,12 +1865,276 @@ export default function KamikazePage() {
           </div>
         )}
 
+        {activeTab === 'hidden' && (
+          <div className="bg-white rounded-xl lg:rounded-2xl border border-[#1d9bf0]/30 shadow-md overflow-hidden">
+            <div className="px-4 sm:px-6 lg:px-8 py-3 sm:py-4 border-b border-gray-100 flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h2 className="text-base lg:text-lg font-bold text-gray-900">Soft silinenler</h2>
+                <p className="text-xs text-gray-500 mt-0.5">Kamikaze listesinden gizlenen kayıtlar. Kullanıcı arşivinde durur.</p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+                {renderHiddenPagination()}
+                <label className="flex items-center gap-2 min-w-0">
+                  <span className="sr-only">Filtre modu</span>
+                  <select
+                    value={hiddenUsernameFilterMode}
+                    onChange={(e) => {
+                      setHiddenUsernameFilterMode(e.target.value);
+                      setHiddenPage(1);
+                    }}
+                    disabled={!hiddenUsernameFilter}
+                    className="w-[6.5rem] sm:w-28 max-w-full px-2.5 py-1.5 text-sm rounded-lg border border-gray-200 bg-white text-gray-800 focus:outline-none focus:ring-2 focus:ring-[#1d9bf0]/30 focus:border-[#1d9bf0] disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <option value="include">Göster</option>
+                    <option value="exclude">Hariç tut</option>
+                  </select>
+                </label>
+                <label className="flex items-center gap-2 min-w-0">
+                  <span className="sr-only">X kullanıcı adı filtre</span>
+                  <select
+                    value={hiddenUsernameFilter}
+                    onChange={(e) => {
+                      setHiddenUsernameFilter(e.target.value);
+                      setHiddenPage(1);
+                    }}
+                    className="w-[9.5rem] sm:w-44 max-w-full px-2.5 py-1.5 text-sm rounded-lg border border-gray-200 bg-white text-gray-800 focus:outline-none focus:ring-2 focus:ring-[#1d9bf0]/30 focus:border-[#1d9bf0]"
+                  >
+                    <option value="">Tümü</option>
+                    {hiddenUsernameOptions.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <span className="text-sm font-semibold tabular-nums text-gray-700 whitespace-nowrap">
+                  {hiddenPagination.totalRecentRows}
+                </span>
+                {hiddenLogs.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={toggleAllHidden}
+                    className="px-3 py-1.5 text-sm font-medium rounded-lg border border-gray-200 text-gray-700 hover:bg-gray-50"
+                  >
+                    {allHiddenLogsSelected ? 'Seçimi kaldır' : 'Tümünü seç'}
+                  </button>
+                )}
+                {selectedHiddenRowIds.size > 0 && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={handleBulkRestoreHidden}
+                      disabled={deleting}
+                      className="px-3 py-1.5 text-sm font-medium rounded-lg bg-[#1d9bf0]/10 text-[#1d9bf0] hover:bg-[#1d9bf0]/20 disabled:opacity-50"
+                    >
+                      {deleting ? 'İşleniyor…' : `Geri al (${selectedHiddenRowIds.size})`}
+                    </button>
+                    {renderBulkActions(selectedHiddenRowIds.size, handleBulkHardDeleteHidden, deleting, 'Kalıcı sil')}
+                  </>
+                )}
+              </div>
+            </div>
+            {hiddenColumnMissing ? (
+              <div className="px-4 lg:px-8 py-12 text-center text-gray-500 text-sm sm:text-base">
+                Soft silinenleri görmek için Supabase&apos;de <code className="bg-gray-100 px-1 rounded">017_analysis_logs_admin_hidden.sql</code> dosyasını çalıştırın.
+              </div>
+            ) : loadingHidden ? (
+              <div className="px-4 lg:px-8 py-12 text-center text-gray-500 text-sm sm:text-base">Yükleniyor...</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm lg:text-base min-w-[640px]">
+                  <thead>
+                    <tr className="bg-gray-50 text-left text-gray-600">
+                      <th className="px-2 sm:px-3 py-2 sm:py-3 w-10">
+                        <input
+                          type="checkbox"
+                          checked={allHiddenLogsSelected}
+                          onChange={toggleAllHidden}
+                          className="rounded border-gray-300"
+                          aria-label="Tümünü seç"
+                        />
+                      </th>
+                      <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium">Önizleme</th>
+                      <SortableTh
+                        label="X"
+                        field="user"
+                        sort={hiddenSort}
+                        onSort={handleHiddenSort}
+                        className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3"
+                      />
+                      <SortableTh
+                        label="Tarih"
+                        field="created_at"
+                        sort={hiddenSort}
+                        onSort={handleHiddenSort}
+                        className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3"
+                      />
+                      <SortableTh
+                        label="Video linki"
+                        field="url"
+                        sort={hiddenSort}
+                        onSort={handleHiddenSort}
+                        className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3"
+                      />
+                      <SortableTh
+                        label="Video"
+                        field="video_count"
+                        sort={hiddenSort}
+                        onSort={handleHiddenSort}
+                        className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3"
+                        title="Bu linkten bulunan video adedi"
+                      />
+                      <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium w-24">İşlem</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {hiddenLogs.length === 0 ? (
+                      <tr>
+                        <td colSpan={7} className="px-4 lg:px-8 py-12 text-center text-gray-500">Soft silinen kayıt yok.</td>
+                      </tr>
+                    ) : (
+                      hiddenLogs.map((row) => (
+                        <tr key={row.id} className="border-t border-gray-100 hover:bg-gray-50/50">
+                          <td className="px-2 sm:px-3 py-2 sm:py-3 align-middle">
+                            <input
+                              type="checkbox"
+                              checked={selectedHiddenRowIds.has(row.id)}
+                              onChange={() => toggleHiddenRow(row.id)}
+                              className="rounded border-gray-300"
+                              aria-label="Satırı seç"
+                            />
+                          </td>
+                          <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 align-middle">
+                            {row.thumbnail ? (
+                              <button
+                                type="button"
+                                onClick={() => setPreviewImage(row.thumbnail)}
+                                className="block rounded-lg overflow-hidden focus:outline-none focus-visible:ring-2 focus-visible:ring-[#1d9bf0]"
+                                title="Önizlemeyi büyüt"
+                                aria-label="Önizlemeyi büyüt"
+                              >
+                                <img src={row.thumbnail} alt="" className="w-12 h-12 sm:w-14 sm:h-14 lg:w-16 lg:h-16 rounded-lg object-cover bg-gray-100 shrink-0 hover:opacity-90 cursor-zoom-in" />
+                              </button>
+                            ) : (
+                              <span className="w-12 h-12 sm:w-14 sm:h-14 lg:w-16 lg:h-16 rounded-lg bg-gray-200 flex items-center justify-center text-gray-400 text-xs shrink-0">—</span>
+                            )}
+                          </td>
+                          <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 text-xs truncate max-w-[90px] sm:max-w-[160px] align-middle">
+                            {row.user_username ? (
+                              <a
+                                href={`https://x.com/${encodeURIComponent(row.user_username)}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-[#1d9bf0] hover:underline"
+                                title={row.user_name}
+                              >
+                                {row.user_name}
+                              </a>
+                            ) : (
+                              <span title={row.user_name}>{row.user_name}</span>
+                            )}
+                          </td>
+                          <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 whitespace-nowrap align-middle">{formatDate(row.created_at)}</td>
+                          <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 max-w-[140px] sm:max-w-none align-middle">
+                            {row.url ? (
+                              <a
+                                href={row.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-[#1d9bf0] hover:text-[#1d9bf0] font-mono text-xs sm:text-sm block truncate sm:truncate-none sm:break-all sm:whitespace-normal"
+                                title={row.url}
+                              >
+                                <span className="sm:hidden">
+                                  {row.url.replace(/^https?:\/\//, '').length > 40
+                                    ? `${row.url.replace(/^https?:\/\//, '').slice(0, 37)}…`
+                                    : row.url.replace(/^https?:\/\//, '')}
+                                </span>
+                                <span className="hidden sm:inline">{row.url}</span>
+                              </a>
+                            ) : (
+                              <span className="text-gray-400">—</span>
+                            )}
+                          </td>
+                          <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 align-middle">{row.video_count ?? 0}</td>
+                          <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 align-middle">
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => handleRestoreHiddenRow(row)}
+                                disabled={deleting}
+                                className="p-1.5 rounded text-[#1d9bf0] hover:bg-[#1d9bf0]/10 disabled:opacity-50"
+                                title="İstatistiklere geri al"
+                                aria-label="Geri al"
+                              >
+                                <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h10a4 4 0 014 4v2M3 10l4-4M3 10l4 4" />
+                                </svg>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleHardDeleteHiddenRow(row)}
+                                disabled={deleting}
+                                className="p-1.5 rounded text-red-600 hover:bg-red-50 disabled:opacity-50"
+                                title="Kalıcı sil"
+                                aria-label="Kalıcı sil"
+                              >
+                                <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                </svg>
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {hiddenPagination.totalPages > 1 && !hiddenColumnMissing && (
+              <div className="px-4 sm:px-6 lg:px-8 py-3 sm:py-4 border-t border-gray-100 flex flex-wrap items-center justify-center">
+                {renderHiddenPagination()}
+              </div>
+            )}
+          </div>
+        )}
+
       </main>
+      {previewImage ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Önizleme"
+          className="fixed inset-0 z-[90] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+          onClick={() => setPreviewImage(null)}
+        >
+          <button
+            type="button"
+            onClick={() => setPreviewImage(null)}
+            className="absolute top-3 right-3 inline-flex h-10 w-10 items-center justify-center rounded-full bg-black/50 text-white hover:bg-black/70 transition"
+            aria-label="Kapat"
+          >
+            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+              <path strokeLinecap="round" d="M6 6l12 12M18 6L6 18" />
+            </svg>
+          </button>
+          <img
+            src={previewImage}
+            alt=""
+            className="max-w-[min(960px,calc(100vw-2rem))] max-h-[calc(100vh-2rem)] w-auto h-auto rounded-xl object-contain shadow-2xl bg-black"
+            onClick={(event) => event.stopPropagation()}
+          />
+        </div>
+      ) : null}
       <ConfirmToast
         open={Boolean(confirmDialog)}
         message={confirmDialog?.message}
-        onConfirm={handleConfirmAction}
+        detail={confirmDialog?.detail}
+        onConfirm={() => runConfirmAction(confirmDialog?.onConfirm)}
+        onSoftConfirm={confirmDialog?.onSoftConfirm ? () => runConfirmAction(confirmDialog.onSoftConfirm) : undefined}
+        onHardConfirm={confirmDialog?.onHardConfirm ? () => runConfirmAction(confirmDialog.onHardConfirm) : undefined}
         onCancel={closeConfirm}
+        confirmLabel={confirmDialog?.confirmLabel}
         confirming={deleting || deletingUsers || deletingGuests}
       />
     </div>

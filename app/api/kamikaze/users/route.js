@@ -30,6 +30,16 @@ async function fetchRegisteredUsers(supabase) {
 }
 
 async function fetchGuestAnalysisRows(supabase) {
+  const withHidden = await supabase
+    .from('analysis_logs')
+    .select('client_ip, user_agent, created_at')
+    .eq('user_id', 'guest')
+    .eq('admin_hidden', false)
+    .order('created_at', { ascending: false })
+    .limit(2000);
+
+  if (!withHidden.error) return withHidden.data ?? [];
+
   const withMeta = await supabase
     .from('analysis_logs')
     .select('client_ip, user_agent, created_at')
