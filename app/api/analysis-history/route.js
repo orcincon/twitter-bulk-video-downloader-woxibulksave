@@ -3,6 +3,7 @@ import { getSessionSafe } from '@/lib/auth.js';
 import { createSupabaseClient, ensureUserInSupabase } from '@/lib/supabase.js';
 import { insertAnalysisLog } from '@/lib/analysis-log.js';
 import { getClientIp, getUserAgent } from '@/lib/request-client.js';
+import { countDistinctVideos, sanitizeAnalysisResults } from '@/lib/tweet-media.js';
 import { canonicalizeTweetUrl, extractTweetId, isAnonymousTweetPath } from '@/lib/tweet-url.js';
 
 /** WBS: Sadece analysis_logs tablosu (UNRESTRICTED). analysis_history tablosu kullanılmaz. */
@@ -24,18 +25,28 @@ function getHistoryUserId(session) {
   return session.user.id || session.user.email || null;
 }
 
-function canonicalizeUrlsForSave(urls, results) {
-  return urls.map((url, index) => {
+function alignUrlsAndResultsForSave(urls, results) {
+  const seen = new Set();
+  const outUrls = [];
+  const outResults = [];
+
+  urls.forEach((url, index) => {
     const statusId = extractTweetId(url);
     const result =
       results[index] ||
       (statusId ? results.find((row) => extractTweetId(row?.tweetUrl) === statusId) : null);
     const fromResult = typeof result?.tweetUrl === 'string' ? result.tweetUrl.trim().split('?')[0] : '';
-    if (fromResult && !isAnonymousTweetPath(fromResult)) return fromResult;
     const author = result?.metadata?.author_screen_name;
-    const canonical = canonicalizeTweetUrl(url, author);
-    return canonical || url;
+    const canonical =
+      fromResult && !isAnonymousTweetPath(fromResult) ? fromResult : canonicalizeTweetUrl(url, author) || url;
+    const id = extractTweetId(canonical) || extractTweetId(url) || canonical;
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    outUrls.push(canonical);
+    if (result) outResults.push(result);
   });
+
+  return { urls: outUrls, results: sanitizeAnalysisResults(outResults) };
 }
 
 const NO_STORE = { headers: { 'Cache-Control': 'private, no-store' } };
@@ -115,18 +126,17 @@ export async function POST(request) {
       return NextResponse.json({ ok: false, error: 'SUPABASE_NOT_CONFIGURED', code: 'NO_CLIENT' }, { status: 503 });
     }
 
-    const urls = canonicalizeUrlsForSave(
+    const { urls, results } = alignUrlsAndResultsForSave(
       Array.isArray(body?.urls) ? body.urls : [],
       Array.isArray(body?.results) ? body.results : []
     );
-    const results = Array.isArray(body?.results) ? body.results : [];
     const language = typeof body?.language === 'string' ? body.language.toUpperCase().slice(0, 2) : null;
     if (urls.length === 0) {
       return NextResponse.json({ ok: true });
     }
     let videoCount = 0;
     results.forEach((r) => {
-      if (r?.status === 'success' && Array.isArray(r.videos)) videoCount += r.videos.length;
+      if (r?.status === 'success' && Array.isArray(r.videos)) videoCount += countDistinctVideos(r.videos);
     });
     const out = await insertAnalysisLog(supabase, {
       user_id: userId,

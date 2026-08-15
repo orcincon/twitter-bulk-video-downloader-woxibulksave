@@ -19,6 +19,7 @@ import {
   mergeAnalysisResults,
   pruneResultsForLinks,
 } from '@/lib/tweet-thumbnails.js';
+import { collapseDistinctVideos } from '@/lib/tweet-media.js';
 
 const SignInToast = dynamic(() => import('./SignInToast.js'), { ssr: false });
 const getStatusId = getTweetStatusId;
@@ -160,6 +161,7 @@ export default function BulkDownloadSection({
   const [pendingDownload, setPendingDownload] = useState(null); // null | { type: 'quality', mode } | { type: 'zip' }
   const [activeDownload, setActiveDownload] = useState(null); // null | { type: 'quality', mode } | { type: 'zip' }
   const requestInProgress = useRef(false);
+  const lastSavedKeyRef = useRef('');
   const prevLinksKeyRef = useRef('');
   const downloadedPostKeysRef = useRef(new Set());
   const bulkThumbnailsRef = useRef({});
@@ -393,34 +395,42 @@ export default function BulkDownloadSection({
         setResults(mergedResults);
         if (hasSuccess) {
           if (isLoggedIn) setSaveHistoryMessage(null);
-          try {
-            const payload = {
-              urls: links,
-              results: mergedResults,
-              language: (lang || 'en').toUpperCase().slice(0, 2),
-            };
-            const saveRes = await fetch('/api/analysis-history', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(payload),
-              credentials: 'include',
-            });
-            const errData = await saveRes.json().catch(() => ({}));
-            if (saveRes.ok) {
-              if (isLoggedIn) {
-                setSaveHistoryMessage(common.saveHistorySuccess || ui.saveHistorySuccess || 'Arşive eklendi.');
+          const saveKey = links.map(getStatusId).filter(Boolean).sort().join(',');
+          if (!saveKey || lastSavedKeyRef.current !== saveKey) {
+            if (saveKey) lastSavedKeyRef.current = saveKey;
+            try {
+              const payload = {
+                urls: links,
+                results: mergedResults,
+                language: (lang || 'en').toUpperCase().slice(0, 2),
+              };
+              const saveRes = await fetch('/api/analysis-history', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+                credentials: 'include',
+              });
+              const errData = await saveRes.json().catch(() => ({}));
+              if (saveRes.ok) {
+                if (isLoggedIn) {
+                  setSaveHistoryMessage(common.saveHistorySuccess || ui.saveHistorySuccess || 'Arşive eklendi.');
+                }
+              } else {
+                if (saveKey && lastSavedKeyRef.current === saveKey) lastSavedKeyRef.current = '';
+                if (saveRes.status === 503) {
+                  if (isLoggedIn) setSaveHistoryMessage('Supabase yapılandırılmamış.');
+                } else if (isLoggedIn) {
+                  const apiMsg = errData?.error || errData?.code || saveRes.statusText || `HTTP ${saveRes.status}`;
+                  console.error('API hatası:', apiMsg);
+                  setSaveHistoryMessage(null);
+                }
               }
-            } else if (saveRes.status === 503) {
-              if (isLoggedIn) setSaveHistoryMessage('Supabase yapılandırılmamış.');
-            } else if (isLoggedIn) {
-              const apiMsg = errData?.error || errData?.code || saveRes.statusText || `HTTP ${saveRes.status}`;
-              console.error('API hatası:', apiMsg);
-              setSaveHistoryMessage(null);
+            } catch (err) {
+              if (saveKey && lastSavedKeyRef.current === saveKey) lastSavedKeyRef.current = '';
+              const msg = err?.message ?? String(err);
+              console.error('API hatası:', msg);
+              if (isLoggedIn) setSaveHistoryMessage(null);
             }
-          } catch (err) {
-            const msg = err?.message ?? String(err);
-            console.error('API hatası:', msg);
-            if (isLoggedIn) setSaveHistoryMessage(null);
           }
         }
       }
@@ -494,15 +504,17 @@ export default function BulkDownloadSection({
         .filter((v) => v?.url && typeof v.url === 'string' && v.url.startsWith('http'))
         .map((v) => ({ ...v, tweetUrl: r.tweetUrl }));
     if (mode === 'best') {
-      return successResults.flatMap(listVideos);
+      return successResults.flatMap((r) => collapseDistinctVideos(listVideos(r)));
     }
     const matched = successResults.flatMap((r) =>
-      (r.videos || [])
-        .filter((v) => v?.url && typeof v.url === 'string' && v.url.startsWith('http') && matchesQuality(v, mode))
-        .map((v) => ({ ...v, tweetUrl: r.tweetUrl }))
+      collapseDistinctVideos(
+        (r.videos || [])
+          .filter((v) => v?.url && typeof v.url === 'string' && v.url.startsWith('http') && matchesQuality(v, mode))
+          .map((v) => ({ ...v, tweetUrl: r.tweetUrl }))
+      )
     );
     if (matched.length > 0) return matched;
-    return successResults.flatMap(listVideos);
+    return successResults.flatMap((r) => collapseDistinctVideos(listVideos(r)));
   }, [results]);
 
   const requestDownload = useCallback((payload) => {
@@ -706,6 +718,7 @@ export default function BulkDownloadSection({
     setDownloadNotice(null);
     setSaveHistoryMessage(null);
     setAnalyzeRequested(false);
+    lastSavedKeyRef.current = '';
     setSignInToast(null);
     setPendingDownload(null);
     setActiveDownload(null);
@@ -743,6 +756,7 @@ export default function BulkDownloadSection({
     setPendingDownload(null);
     setActiveDownload(null);
     setSaveHistoryMessage(null);
+    lastSavedKeyRef.current = '';
     setRawText(SAMPLE_LINK);
 
     if (sameAsCurrent) {
@@ -773,8 +787,10 @@ export default function BulkDownloadSection({
   const linkDisplayRows = links.flatMap((url) => {
     const statusId = getStatusId(url);
     const r = statusId ? (linkToResult.get(statusId) ?? null) : null;
-    const playableVideos = (r?.videos || []).filter(
-      (v) => v?.url && typeof v.url === 'string' && v.url.startsWith('http') && v.mediaType !== 'photo'
+    const playableVideos = collapseDistinctVideos(
+      (r?.videos || []).filter(
+        (v) => v?.url && typeof v.url === 'string' && v.url.startsWith('http') && v.mediaType !== 'photo'
+      )
     );
     const rowCount = Math.max(1, playableVideos.length);
     return Array.from({ length: rowCount }, (_, videoIndex) => ({

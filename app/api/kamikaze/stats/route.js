@@ -10,6 +10,7 @@ import {
   isAnonymousTweetPath,
   resolveTweetDisplayUrl,
 } from '@/lib/tweet-url.js';
+import { countDistinctVideos } from '@/lib/tweet-media.js';
 
 function makeToken(email, secret) {
   return createHash('sha256').update(`${email || ''}:${secret}`).digest('hex');
@@ -18,45 +19,6 @@ function makeToken(email, secret) {
 function isMissingColumnError(error) {
   const message = String(error?.message || '');
   return error?.code === 'PGRST204' || /column .* does not exist/i.test(message) || /Could not find the '.*' column/.test(message);
-}
-
-function linkCountFromLog(log) {
-  if (Array.isArray(log?.urls) && log.urls.length > 0) return log.urls.length;
-  if (typeof log?.link_count === 'number' && log.link_count > 0) return log.link_count;
-  return 1;
-}
-
-async function sumAnalysisLinkCount(supabase) {
-  const pageSize = 1000;
-  let from = 0;
-  let total = 0;
-  let filterAdminHidden = true;
-
-  while (true) {
-    let query = supabase
-      .from('analysis_logs')
-      .select('link_count, urls')
-      .range(from, from + pageSize - 1);
-    if (filterAdminHidden) query = query.eq('admin_hidden', false);
-
-    const { data, error } = await query;
-    if (error) {
-      if (filterAdminHidden && isMissingColumnError(error)) {
-        filterAdminHidden = false;
-        from = 0;
-        total = 0;
-        continue;
-      }
-      return { total: null, error };
-    }
-    if (!data?.length) break;
-
-    for (const row of data) total += linkCountFromLog(row);
-    if (data.length < pageSize) break;
-    from += pageSize;
-  }
-
-  return { total, error: null };
 }
 
 async function fetchAllAnalysisLogs(supabase, { hiddenOnly = false } = {}) {
@@ -100,10 +62,21 @@ function expandRecentLogs(rawLogs, resolveUserLabel) {
     const urls = Array.isArray(log.urls) ? log.urls : [];
     const results = Array.isArray(log.results_json) ? log.results_json : [];
     const { label: userName, username: userUsername } = resolveUserLabel(log.user_id);
-    const rows =
-      urls.length > 0
-        ? urls.map((url, i) => ({ url: url || null, result: results[i] }))
-        : [{ url: null, result: results[0] }];
+    const seenIds = new Set();
+    const rows = [];
+    const source = urls.length > 0 ? urls : [null];
+    source.forEach((url, i) => {
+      const result =
+        results[i] ||
+        (extractTweetId(url) ? results.find((row) => extractTweetId(row?.tweetUrl) === extractTweetId(url)) : results[0]);
+      const statusId = extractTweetId(url) || extractTweetId(result?.tweetUrl);
+      if (statusId) {
+        if (seenIds.has(statusId)) return;
+        seenIds.add(statusId);
+      }
+      rows.push({ url: url || null, result });
+    });
+    if (rows.length === 0) rows.push({ url: null, result: results[0] });
 
     rows.forEach(({ url, result }, i) => {
       const thumb =
@@ -111,7 +84,7 @@ function expandRecentLogs(rawLogs, resolveUserLabel) {
           ? result.thumbnail
           : null;
       const videoCount = Array.isArray(result?.videos)
-        ? result.videos.length
+        ? countDistinctVideos(result.videos)
         : i === 0 && typeof log.video_count === 'number'
           ? log.video_count
           : 0;
@@ -129,6 +102,23 @@ function expandRecentLogs(rawLogs, resolveUserLabel) {
     });
   }
   return recentLogs;
+}
+
+const DUPLICATE_ROW_WINDOW_MS = 30 * 1000;
+
+function collapseDuplicateRecentRows(rows) {
+  const seen = new Map();
+  const out = [];
+  for (const row of rows) {
+    const tweetId = extractTweetId(row.url) || row.url || row.id;
+    const key = `${row.user_id || 'guest'}|${tweetId}`;
+    const t = Date.parse(row.created_at) || 0;
+    const prev = seen.get(key);
+    if (prev != null && Math.abs(prev - t) < DUPLICATE_ROW_WINDOW_MS) continue;
+    seen.set(key, t);
+    out.push(row);
+  }
+  return out;
 }
 
 async function resolveLegacyAnonymousUrls(recentLogs) {
@@ -245,8 +235,7 @@ export async function GET(request) {
   const hiddenOnly = searchParams.get('hidden') === '1';
 
   try {
-    const [linkSumRes, usersRes, tokenUsersRes, allUsersRes, logsFetch] = await Promise.all([
-      hiddenOnly ? Promise.resolve({ total: 0, error: null }) : sumAnalysisLinkCount(supabase),
+    const [usersRes, tokenUsersRes, allUsersRes, logsFetch] = await Promise.all([
       supabase.from('users').select('id', { count: 'exact', head: true }),
       hiddenOnly
         ? Promise.resolve({ count: 0 })
@@ -275,14 +264,8 @@ export async function GET(request) {
       }
     }
 
-    if (linkSumRes.error) {
-      console.warn('[kamikaze/stats] link sum:', linkSumRes.error.message);
-    }
-
     const totalUsers = usersRes?.count ?? 0;
     const usersWithOAuthToken = tokenUsersRes?.count ?? 0;
-    const totalLogs =
-      linkSumRes.total ?? rawLogs.reduce((sum, log) => sum + linkCountFromLog(log), 0);
 
     const userById = new Map();
     const userByEmail = new Map();
@@ -333,7 +316,10 @@ export async function GET(request) {
       return { label: '—', username: null };
     };
 
-    const allRecentLogs = await resolveLegacyAnonymousUrls(expandRecentLogs(rawLogs, resolveUserLabel));
+    const allRecentLogs = collapseDuplicateRecentRows(
+      await resolveLegacyAnonymousUrls(expandRecentLogs(rawLogs, resolveUserLabel))
+    );
+    const totalLogs = allRecentLogs.length;
     const usernameOptions = buildUsernameOptions(allRecentLogs);
     const filteredLogs = usernameFilter
       ? allRecentLogs.filter((row) => matchesUsernameFilter(row, usernameFilter, usernameMode))

@@ -11,6 +11,8 @@ import {
   recordGuestDownloads,
 } from '@/lib/guest-limit.js';
 
+import { collapseDistinctVideos } from '@/lib/tweet-media.js';
+
 const STATUS_ID_REGEX = /\/status\/(\d+)/i;
 function getStatusId(u) {
   const m = String(u || '').match(STATUS_ID_REGEX);
@@ -36,6 +38,7 @@ export default function ResultsContent({
   const [isBulkDownloading, setIsBulkDownloading] = useState(false);
   const [signInToast, setSignInToast] = useState(null);
   const loadedLogIdRef = useRef(null);
+  const lastSavedKeyRef = useRef('');
 
   useEffect(() => {
     if (isLoggedIn) clearGuestDownloadCount();
@@ -151,6 +154,9 @@ export default function ResultsContent({
           setResults(data.results);
           const hasSuccess = data.results.some((r) => r.status === 'success' && r.videos?.length > 0);
           if (hasSuccess) {
+            const saveKey = urlsToAnalyze.map(getStatusId).filter(Boolean).sort().join(',');
+            if (saveKey && lastSavedKeyRef.current === saveKey) return;
+            if (saveKey) lastSavedKeyRef.current = saveKey;
             fetch('/api/analysis-history', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -160,7 +166,9 @@ export default function ResultsContent({
                 language: (lang || 'en').toUpperCase().slice(0, 2),
               }),
               credentials: 'include',
-            }).catch(() => {});
+            }).catch(() => {
+              if (saveKey && lastSavedKeyRef.current === saveKey) lastSavedKeyRef.current = '';
+            });
           }
         }
       } catch (err) {
@@ -175,9 +183,11 @@ export default function ResultsContent({
 
   const successResults = results.filter((r) => r.status === 'success' && r.videos?.length > 0);
   const allVideos = successResults.flatMap((r) =>
-    (r.videos || [])
-      .filter((v) => v?.url && typeof v.url === 'string' && v.url.startsWith('http') && (v.label || v.quality || '') !== 'Standard')
-      .map((v) => ({ ...v, tweetUrl: r.tweetUrl }))
+    collapseDistinctVideos(
+      (r.videos || [])
+        .filter((v) => v?.url && typeof v.url === 'string' && v.url.startsWith('http') && (v.label || v.quality || '') !== 'Standard')
+        .map((v) => ({ ...v, tweetUrl: r.tweetUrl }))
+    )
   );
 
   const handleDownloadAll = useCallback(async () => {

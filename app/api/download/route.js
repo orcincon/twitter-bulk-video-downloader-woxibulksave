@@ -3,6 +3,7 @@ import { getSessionSafe } from '@/lib/auth.js';
 import { createSupabaseClient, ensureUserInSupabase } from '@/lib/supabase.js';
 import { decryptToken } from '@/lib/token-crypto.js';
 import { canonicalizeResultTweetUrl, fetchFixTweetRaw, parseFixTweetMetadata } from '@/lib/fixtweet.js';
+import { collapseDistinctVideos } from '@/lib/tweet-media.js';
 import { extractTweetId as extractTweetIdFromUrl } from '@/lib/tweet-url.js';
 
 const TWITTER_URL_REGEX = /https?:\/\/(www\.|mobile\.)?(x\.com|twitter\.com)\/[^/]+\/status\/(\d+)/;
@@ -115,11 +116,12 @@ function pickBestVariant(variants) {
   return best;
 }
 
-/** Her medya öğesinden en iyi kaliteyi al; aynı URL'yi bir kez say. */
+/** Her medya öğesinden en iyi kaliteyi al; kalite varyantlarını tek videoda tut. */
 function finalizeVideoList(videoList, max = 10) {
+  const collapsed = collapseDistinctVideos(videoList);
   const seen = new Set();
   const out = [];
-  for (const v of videoList) {
+  for (const v of collapsed) {
     if (!v?.url || seen.has(v.url)) continue;
     seen.add(v.url);
     out.push({ ...v, label: formatQualityLabel(v.quality) });
@@ -215,12 +217,17 @@ function parseSyndicationVideos(data) {
   if (parsed?.result) parsed = parsed.result;
   if (parsed?.legacy) parsed = { ...parsed, ...parsed.legacy };
 
-  extractFromMedia(parsed?.mediaDetails);
-  extractFromMedia(parsed?.legacy?.entities?.media);
-  extractFromMedia(parsed?.legacy?.extended_entities?.media);
-  extractFromMedia(parsed?.entities?.media);
-  extractFromMedia(parsed?.extended_entities?.media);
-  if (parsed?.video?.variants) {
+  extractFromMedia(
+    (Array.isArray(parsed?.mediaDetails) && parsed.mediaDetails.length && parsed.mediaDetails) ||
+      (Array.isArray(parsed?.extended_entities?.media) && parsed.extended_entities.media.length && parsed.extended_entities.media) ||
+      (Array.isArray(parsed?.legacy?.extended_entities?.media) &&
+        parsed.legacy.extended_entities.media.length &&
+        parsed.legacy.extended_entities.media) ||
+      (Array.isArray(parsed?.entities?.media) && parsed.entities.media.length && parsed.entities.media) ||
+      (Array.isArray(parsed?.legacy?.entities?.media) && parsed.legacy.entities.media.length && parsed.legacy.entities.media) ||
+      null
+  );
+  if (videoList.length === 0 && parsed?.video?.variants) {
     const best = pickBestVariant(parsed.video.variants);
     if (best) videoList.push(best);
   }
@@ -261,9 +268,9 @@ function parseFixTweetVideos(data) {
       photoList.push({ url: u, quality: 'photo', label: 'Görsel', mediaType: 'photo', ext });
     }
   };
-  if (Array.isArray(media.videos)) media.videos.forEach(addVideo);
+  if (Array.isArray(media.videos) && media.videos.length) media.videos.forEach(addVideo);
   else if (media.videos) addVideo(media.videos);
-  if (media.video) addVideo(media.video);
+  else if (media.video) addVideo(media.video);
   if (Array.isArray(media.photos)) media.photos.forEach(addPhoto);
   else if (media.photos) addPhoto(media.photos);
   const videos = [...finalizeVideoList(videoList), ...photoList];
