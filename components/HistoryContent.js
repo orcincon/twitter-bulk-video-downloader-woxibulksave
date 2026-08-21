@@ -21,6 +21,42 @@ function pickArchiveDisplayUrl(urls) {
   return urls[urls.length - 1] || urls[0];
 }
 
+function upgradeTwitterImageUrl(url) {
+  if (!isValidThumbUrl(url)) return null;
+  try {
+    const parsed = new URL(url);
+    if (!/(?:^|\.)twimg\.com$/i.test(parsed.hostname)) return url;
+    if (parsed.searchParams.has('name')) {
+      parsed.searchParams.set('name', 'orig');
+      return parsed.toString();
+    }
+    if (/:(?:small|medium|thumb|large)$/i.test(parsed.pathname)) {
+      parsed.pathname = parsed.pathname.replace(/:(?:small|medium|thumb|large)$/i, ':orig');
+      return parsed.toString();
+    }
+    if (/\/media\//i.test(parsed.pathname) && !parsed.search && !/:(?:orig)$/i.test(parsed.pathname)) {
+      return `${url}:orig`;
+    }
+  } catch {
+    return url;
+  }
+  return url;
+}
+
+function pickPreviewUrl(log, thumbnail) {
+  const results = Array.isArray(log?.results_json) ? log.results_json : [];
+  const displayUrl = pickArchiveDisplayUrl(log?.urls);
+  const statusId = getTweetStatusId(displayUrl);
+  const result = statusId
+    ? results.find((row) => getTweetStatusId(row?.tweetUrl) === statusId)
+    : results[results.length - 1];
+  const photo = (result?.videos || []).find(
+    (video) => video?.mediaType === 'photo' && isValidThumbUrl(video?.url)
+  );
+  const fromResult = isValidThumbUrl(result?.thumbnail) ? result.thumbnail : null;
+  return upgradeTwitterImageUrl(photo?.url || fromResult || thumbnail);
+}
+
 async function fetchArchiveThumbnail(url, statusId) {
   if (!url || !statusId) return null;
   try {
@@ -64,6 +100,7 @@ export default function HistoryContent({ lang = 'en', layout = {}, accentClass, 
   const [fetchedMetadata, setFetchedMetadata] = useState({});
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmPayload, setConfirmPayload] = useState(null);
+  const [previewImage, setPreviewImage] = useState(null);
   const [softDeletingId, setSoftDeletingId] = useState(null);
   const [softDeletingAll, setSoftDeletingAll] = useState(false);
 
@@ -77,6 +114,12 @@ export default function HistoryContent({ lang = 'en', layout = {}, accentClass, 
   const clearAllLabel = t.clearAllLabel || FALLBACK.clearAllLabel;
   const confirmClearMessage = t.confirmClearMessage || FALLBACK.confirmClearMessage;
   const cancelLabel = t.cancelLabel || layout.common?.cancel || FALLBACK.cancelLabel;
+  const previewLabel =
+    lang === 'tr' ? 'Önizleme' : lang === 'de' ? 'Vorschau' : lang === 'es' ? 'Vista previa' : 'Preview';
+  const enlargeLabel =
+    lang === 'tr' ? 'Önizlemeyi büyüt' : lang === 'de' ? 'Vorschau vergrößern' : lang === 'es' ? 'Ampliar vista previa' : 'Enlarge preview';
+  const closeLabel =
+    lang === 'tr' ? 'Kapat' : lang === 'de' ? 'Schließen' : lang === 'es' ? 'Cerrar' : 'Close';
 
   const fetchLogs = useCallback(async () => {
     try {
@@ -104,6 +147,15 @@ export default function HistoryContent({ lang = 'en', layout = {}, accentClass, 
     setLoading(true);
     fetchLogs();
   }, [sessionStatus, authenticated, fetchLogs]);
+
+  useEffect(() => {
+    if (!previewImage) return undefined;
+    const onKey = (event) => {
+      if (event.key === 'Escape') setPreviewImage(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [previewImage]);
 
   const openConfirmSingle = (logId) => {
     setConfirmPayload({ type: 'single', logId });
@@ -309,17 +361,26 @@ export default function HistoryContent({ lang = 'en', layout = {}, accentClass, 
             className="flex gap-3 p-3 sm:p-4 rounded-xl border border-[#1d9bf0]/30 bg-white hover:bg-gray-50 transition shadow-sm items-start"
           >
             {card.thumbnail ? (
-              <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-lg overflow-hidden bg-gray-200 shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  const url = pickPreviewUrl(card.log, card.thumbnail);
+                  if (url) setPreviewImage(url);
+                }}
+                className="w-12 h-12 sm:w-14 sm:h-14 rounded-lg overflow-hidden bg-gray-200 shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#1d9bf0]"
+                title={enlargeLabel}
+                aria-label={enlargeLabel}
+              >
                 <img
                   key={`${card.key}-${card.thumbnail}`}
                   src={card.thumbnail}
-                  alt="WBS - X/Twitter video önizleme"
+                  alt=""
                   width={56}
                   height={56}
-                  className="w-full h-full object-cover"
+                  className="w-full h-full object-cover hover:opacity-90 cursor-zoom-in"
                   referrerPolicy="no-referrer"
                 />
-              </div>
+              </button>
             ) : (
               <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-lg bg-gray-200 shrink-0 flex items-center justify-center text-gray-400 text-xl">
                 🎬
@@ -366,6 +427,33 @@ export default function HistoryContent({ lang = 'en', layout = {}, accentClass, 
           {backToHomeLabel}
         </Link>
       </div>
+      {previewImage ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label={previewLabel}
+          className="fixed inset-0 z-[90] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+          onClick={() => setPreviewImage(null)}
+        >
+          <button
+            type="button"
+            onClick={() => setPreviewImage(null)}
+            className="absolute top-3 right-3 inline-flex h-10 w-10 items-center justify-center rounded-full bg-black/50 text-white hover:bg-black/70 transition"
+            aria-label={closeLabel}
+          >
+            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+              <path strokeLinecap="round" d="M6 6l12 12M18 6L6 18" />
+            </svg>
+          </button>
+          <img
+            src={previewImage}
+            alt=""
+            className="max-w-[min(960px,calc(100vw-2rem))] max-h-[calc(100vh-2rem)] w-auto h-auto rounded-xl object-contain shadow-2xl bg-black"
+            referrerPolicy="no-referrer"
+            onClick={(event) => event.stopPropagation()}
+          />
+        </div>
+      ) : null}
     </div>
   );
 }
