@@ -12,6 +12,33 @@ function isMissingColumnError(error) {
   return error?.code === 'PGRST204' || /column .* does not exist/i.test(message) || /Could not find the '.*' column/.test(message);
 }
 
+async function assertKamikazeUsersAccess() {
+  const allowedEmail = (process.env.KAMIKAZE_EMAIL || '').trim().toLowerCase();
+  const allowedSecret = (process.env.KAMIKAZE_SECRET || '').trim();
+  if (!allowedSecret) {
+    return { error: NextResponse.json({ error: 'NOT_CONFIGURED' }, { status: 503 }) };
+  }
+
+  const expectedToken = makeToken(allowedEmail, allowedSecret);
+  const cookieStore = await cookies();
+  const token = cookieStore.get('kamikaze')?.value;
+  if (token !== expectedToken) {
+    return { error: NextResponse.json({ error: 'UNAUTHORIZED' }, { status: 401 }) };
+  }
+
+  const supabase = createSupabaseClient();
+  if (!supabase) {
+    return { error: NextResponse.json({ error: 'SUPABASE_NOT_CONFIGURED' }, { status: 503 }) };
+  }
+  return { supabase };
+}
+
+function emptyToNull(value, maxLen) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim().slice(0, maxLen);
+  return trimmed || null;
+}
+
 async function fetchRegisteredUsers(supabase) {
   const full = await supabase
     .from('users')
@@ -70,23 +97,9 @@ async function fetchGuestAnalysisRows(supabase) {
 }
 
 export async function GET() {
-  const allowedEmail = (process.env.KAMIKAZE_EMAIL || '').trim().toLowerCase();
-  const allowedSecret = (process.env.KAMIKAZE_SECRET || '').trim();
-  if (!allowedSecret) {
-    return NextResponse.json({ error: 'NOT_CONFIGURED' }, { status: 503 });
-  }
-
-  const expectedToken = makeToken(allowedEmail, allowedSecret);
-  const cookieStore = await cookies();
-  const token = cookieStore.get('kamikaze')?.value;
-  if (token !== expectedToken) {
-    return NextResponse.json({ error: 'UNAUTHORIZED' }, { status: 401 });
-  }
-
-  const supabase = createSupabaseClient();
-  if (!supabase) {
-    return NextResponse.json({ error: 'SUPABASE_NOT_CONFIGURED' }, { status: 503 });
-  }
+  const auth = await assertKamikazeUsersAccess();
+  if (auth.error) return auth.error;
+  const { supabase } = auth;
 
   try {
     const [usersRes, guestRows] = await Promise.all([
@@ -122,6 +135,71 @@ export async function GET() {
     return NextResponse.json({ users, guests });
   } catch (err) {
     console.warn('[kamikaze/users]', err);
+    return NextResponse.json({ error: 'QUERY_FAILED' }, { status: 500 });
+  }
+}
+
+export async function PATCH(request) {
+  const auth = await assertKamikazeUsersAccess();
+  if (auth.error) return auth.error;
+  const { supabase } = auth;
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: 'INVALID_BODY' }, { status: 400 });
+  }
+
+  const id = typeof body?.id === 'string' ? body.id.trim() : '';
+  if (!id) {
+    return NextResponse.json({ error: 'MISSING_ID' }, { status: 400 });
+  }
+
+  const name = 'name' in body ? emptyToNull(body.name, 200) : undefined;
+
+  let preferredLanguage;
+  if ('preferred_language' in body) {
+    const lang = typeof body.preferred_language === 'string' ? body.preferred_language.trim().toLowerCase() : '';
+    if (lang && !['en', 'tr', 'de', 'es'].includes(lang)) {
+      return NextResponse.json({ error: 'LANGUAGE_INVALID' }, { status: 400 });
+    }
+    preferredLanguage = lang || null;
+  }
+
+  const payload = { updated_at: new Date().toISOString() };
+  if (name !== undefined) payload.name = name;
+  if (preferredLanguage !== undefined) payload.preferred_language = preferredLanguage;
+
+  const selectCols = 'id, email, name, username, image, preferred_language, created_at, updated_at, access_token';
+
+  try {
+    let result = await supabase.from('users').update(payload).eq('id', id).select(selectCols).maybeSingle();
+
+    if (result.error && isMissingColumnError(result.error)) {
+      result = await supabase
+        .from('users')
+        .update(payload)
+        .eq('id', id)
+        .select('id, email, name, image, preferred_language, created_at, updated_at, access_token')
+        .maybeSingle();
+    }
+
+    if (result.error) {
+      console.warn('[kamikaze/users] patch', result.error.message);
+      return NextResponse.json({ error: 'QUERY_FAILED' }, { status: 500 });
+    }
+    if (!result.data) {
+      return NextResponse.json({ error: 'NOT_FOUND' }, { status: 404 });
+    }
+
+    const { access_token, ...rest } = result.data;
+    return NextResponse.json({
+      ok: true,
+      user: { ...rest, has_oauth_token: Boolean(access_token?.trim()) },
+    });
+  } catch (err) {
+    console.warn('[kamikaze/users] patch', err);
     return NextResponse.json({ error: 'QUERY_FAILED' }, { status: 500 });
   }
 }

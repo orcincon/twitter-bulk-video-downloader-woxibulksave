@@ -33,6 +33,11 @@ function nextSortState(prev, field) {
   return { field, dir: prev.dir === 'asc' ? 'desc' : 'asc' };
 }
 
+function upgradeProfileImageUrl(url) {
+  if (typeof url !== 'string' || !url.startsWith('http')) return null;
+  return url.replace(/_(?:normal|bigger|mini|reasonably_small|\d+x\d+)(\.(?:jpe?g|png|webp|gif))?(\?.*)?$/i, '$1$2');
+}
+
 function SortableTh({ label, field, sort, onSort, className = '', align = 'left', title }) {
   const active = sort?.field === field;
   const arrow = !active ? '↕' : sort.dir === 'asc' ? '↑' : '↓';
@@ -135,6 +140,8 @@ export default function KamikazePage() {
   const [syncingUsernames, setSyncingUsernames] = useState(false);
   const [usernameSyncMessage, setUsernameSyncMessage] = useState('');
   const [actionError, setActionError] = useState('');
+  const [editingUser, setEditingUser] = useState(null);
+  const [savingUser, setSavingUser] = useState(false);
   const [visitorStats, setVisitorStats] = useState({
     uniqueVisitors: 0,
     totalVisits: 0,
@@ -282,13 +289,15 @@ export default function KamikazePage() {
   }, [activeTab, hiddenPage, hiddenUsernameFilter, hiddenUsernameFilterMode, hiddenSort]);
 
   useEffect(() => {
-    if (!previewImage) return undefined;
+    if (!previewImage && !editingUser) return undefined;
     const onKey = (event) => {
-      if (event.key === 'Escape') setPreviewImage(null);
+      if (event.key !== 'Escape') return;
+      if (previewImage) setPreviewImage(null);
+      else if (editingUser && !savingUser) setEditingUser(null);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [previewImage]);
+  }, [previewImage, editingUser, savingUser]);
 
   const loadUsers = async () => {
     setLoadingUsers(true);
@@ -731,6 +740,56 @@ export default function KamikazePage() {
       onSoftConfirm: () => deleteUsers([user.id], 'soft'),
       onHardConfirm: () => deleteUsers([user.id], 'hard'),
     });
+  };
+
+  const openEditUser = (user) => {
+    setActionError('');
+    setEditingUser({
+      id: user.id,
+      username: user.username || '',
+      email: user.email || '',
+      name: user.name || '',
+      preferred_language: String(user.preferred_language || 'en').toLowerCase(),
+    });
+  };
+
+  const saveEditedUser = async (event) => {
+    event?.preventDefault?.();
+    if (!editingUser?.id || savingUser) return;
+    setSavingUser(true);
+    setActionError('');
+    try {
+      const res = await fetch('/api/kamikaze/users', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: editingUser.id,
+          name: editingUser.name,
+          preferred_language: editingUser.preferred_language,
+        }),
+        credentials: 'include',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 401) {
+        setStatus('login');
+        return;
+      }
+      if (!res.ok || !data.ok || !data.user) {
+        const messages = {
+          LANGUAGE_INVALID: 'Dil geçersiz.',
+          NOT_FOUND: 'Kullanıcı bulunamadı.',
+        };
+        setActionError(messages[data.error] || 'Kullanıcı güncellenemedi.');
+        return;
+      }
+      setUsers((prev) => prev.map((row) => (row.id === data.user.id ? { ...row, ...data.user } : row)));
+      setEditingUser(null);
+      setUsernameSyncMessage('Kullanıcı bilgileri güncellendi.');
+    } catch {
+      setActionError('Bağlantı hatası.');
+    } finally {
+      setSavingUser(false);
+    }
   };
 
   const handleBulkDeleteUsers = () => {
@@ -1449,7 +1508,7 @@ export default function KamikazePage() {
                         onSort={(field) => setUsersSort((prev) => nextSortState(prev, field))}
                         className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 whitespace-nowrap"
                       />
-                        <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium w-12">Sil</th>
+                        <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium w-20">İşlem</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1471,7 +1530,15 @@ export default function KamikazePage() {
                             </td>
                             <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 align-top">
                               {u.image ? (
-                                <img src={u.image} alt="" className="w-8 h-8 sm:w-9 sm:h-9 lg:w-10 lg:h-10 rounded-full object-cover shrink-0" />
+                                <button
+                                  type="button"
+                                  onClick={() => setPreviewImage(upgradeProfileImageUrl(u.image) || u.image)}
+                                  className="block rounded-full overflow-hidden focus:outline-none focus-visible:ring-2 focus-visible:ring-[#1d9bf0]"
+                                  title="Profil fotoğrafını büyüt"
+                                  aria-label="Profil fotoğrafını büyüt"
+                                >
+                                  <img src={u.image} alt="" className="w-8 h-8 sm:w-9 sm:h-9 lg:w-10 lg:h-10 rounded-full object-cover shrink-0 hover:opacity-90 cursor-zoom-in" />
+                                </button>
                               ) : (
                                 <span className="w-8 h-8 sm:w-9 sm:h-9 lg:w-10 lg:h-10 rounded-full bg-gray-200 flex items-center justify-center text-gray-500 text-xs shrink-0">?</span>
                               )}
@@ -1497,16 +1564,27 @@ export default function KamikazePage() {
                             <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 whitespace-nowrap align-top">{formatDate(u.created_at)}</td>
                             <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 whitespace-nowrap align-top">{formatDate(u.updated_at)}</td>
                             <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 align-top">
-                              <button
-                                type="button"
-                                onClick={() => handleDeleteUser(u)}
-                                disabled={deletingUsers}
-                                className="p-1.5 rounded text-red-600 hover:bg-red-50 disabled:opacity-50"
-                                title="Kullanıcıyı sil (soft veya kalıcı)"
-                                aria-label="Sil"
-                              >
-                                <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-                              </button>
+                              <div className="flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => openEditUser(u)}
+                                  className="p-1.5 rounded text-[#1d9bf0] hover:bg-[#1d9bf0]/10"
+                                  title="Kullanıcıyı düzenle"
+                                  aria-label="Düzenle"
+                                >
+                                  <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5h2m3.5 1.5l-9.5 9.5L5 19l3-2 9.5-9.5A2.12 2.12 0 0015.5 6.5z" /></svg>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteUser(u)}
+                                  disabled={deletingUsers}
+                                  className="p-1.5 rounded text-red-600 hover:bg-red-50 disabled:opacity-50"
+                                  title="Kullanıcıyı sil (soft veya kalıcı)"
+                                  aria-label="Sil"
+                                >
+                                  <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                                </button>
+                              </div>
                             </td>
                           </tr>
                         ))
@@ -2120,6 +2198,76 @@ export default function KamikazePage() {
             className="max-w-[min(960px,calc(100vw-2rem))] max-h-[calc(100vh-2rem)] w-auto h-auto rounded-xl object-contain shadow-2xl bg-black"
             onClick={(event) => event.stopPropagation()}
           />
+        </div>
+      ) : null}
+      {editingUser ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="edit-user-title"
+          className="fixed inset-0 z-[90] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm"
+          onClick={() => {
+            if (!savingUser) setEditingUser(null);
+          }}
+        >
+          <form
+            onSubmit={saveEditedUser}
+            onClick={(event) => event.stopPropagation()}
+            className="bg-white rounded-2xl p-5 sm:p-6 shadow-xl max-w-md w-full border-2 border-[#1d9bf0]/30 space-y-4"
+          >
+            <div>
+              <h3 id="edit-user-title" className="text-lg font-bold text-gray-900">Kullanıcıyı düzenle</h3>
+              <p className="text-xs text-gray-500 mt-1 break-all">ID: {editingUser.id}</p>
+            </div>
+            <div>
+              <p className="text-sm font-medium text-gray-700">X kullanıcı adı</p>
+              <p className="mt-1 text-sm text-gray-900 break-all">{editingUser.username ? `@${editingUser.username}` : '—'}</p>
+            </div>
+            <div>
+              <p className="text-sm font-medium text-gray-700">E-posta</p>
+              <p className="mt-1 text-sm text-gray-900 break-all">{editingUser.email || '—'}</p>
+            </div>
+            <label className="block">
+              <span className="text-sm font-medium text-gray-700">Ad</span>
+              <input
+                type="text"
+                value={editingUser.name}
+                onChange={(e) => setEditingUser((prev) => ({ ...prev, name: e.target.value }))}
+                className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-[#1d9bf0] focus:ring-2 focus:ring-[#1d9bf0]/30"
+                maxLength={200}
+              />
+            </label>
+            <label className="block">
+              <span className="text-sm font-medium text-gray-700">Dil</span>
+              <select
+                value={editingUser.preferred_language || 'en'}
+                onChange={(e) => setEditingUser((prev) => ({ ...prev, preferred_language: e.target.value }))}
+                className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-[#1d9bf0] focus:ring-2 focus:ring-[#1d9bf0]/30"
+              >
+                <option value="en">EN</option>
+                <option value="tr">TR</option>
+                <option value="de">DE</option>
+                <option value="es">ES</option>
+              </select>
+            </label>
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setEditingUser(null)}
+                disabled={savingUser}
+                className="px-4 py-2 rounded-lg text-sm font-medium border border-gray-200 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              >
+                İptal
+              </button>
+              <button
+                type="submit"
+                disabled={savingUser}
+                className="px-4 py-2 rounded-lg text-sm font-semibold bg-[#1d9bf0] hover:bg-[#1686d4] text-white disabled:opacity-50"
+              >
+                {savingUser ? 'Kaydediliyor...' : 'Kaydet'}
+              </button>
+            </div>
+          </form>
         </div>
       ) : null}
       <ConfirmToast
