@@ -4,7 +4,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import MetadataIcons from './MetadataIcons.js';
 import { buildDownloadFileName, buildZipFileName } from '@/lib/download-filename.js';
-import { downloadMediaInBrowser, fetchMediaBlob, handleMediaDownloadClick, probeMediaBytes, isDownloadAborted } from '@/lib/client-download.js';
+import { downloadMediaInBrowser, fetchMediaBlob, probeMediaBytes, isDownloadAborted } from '@/lib/client-download.js';
 import {
   clearGuestDownloadCount,
   isGuestLimitReached,
@@ -126,12 +126,6 @@ const themeRemoveStyles = {
   dark: 'text-gray-600 hover:text-red-600 hover:bg-red-50',
   blue: 'text-gray-600 hover:text-red-600 hover:bg-red-50',
   ocean: 'text-gray-600 hover:text-red-600 hover:bg-red-50',
-};
-
-const themeVideoCardStyles = {
-  dark: 'bg-white border-[#1d9bf0]/30 rounded-xl shadow-md hover:shadow-lg transition-all',
-  blue: 'bg-white border-[#1d9bf0]/30 rounded-xl shadow-md hover:shadow-lg transition-all',
-  ocean: 'bg-white border-[#1d9bf0]/30 rounded-xl shadow-md hover:shadow-lg transition-all',
 };
 
 function formatMb(bytes, lang = 'en') {
@@ -830,21 +824,6 @@ export default function BulkDownloadSection({
     }
   }, [links, results, isLoggedIn, isBulkDownloading, isProcessing, promptGuestSignIn]);
 
-  const handleGuestDownloadClick = useCallback(
-    (e) => {
-      e.stopPropagation();
-      setError(null);
-      if (isLoggedIn) return;
-      if (isGuestLimitReached()) {
-        e.preventDefault();
-        promptGuestSignIn('limit');
-        return;
-      }
-      recordGuestDownloads(1);
-    },
-    [isLoggedIn, promptGuestSignIn]
-  );
-
   const handleDownloadByQuality = useCallback(
     async (mode) => {
       const allVideos = filterNewDownloads(collectDownloadableVideos(mode));
@@ -1076,8 +1055,10 @@ export default function BulkDownloadSection({
     setLinks((prev) => prev.filter((u) => u !== urlToRemove));
     setRawText((prev) => {
       const escaped = urlToRemove.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      // Stored URLs are query-stripped (cleanExtractedUrl); the textarea may still
+      // contain ?s=20, hashes, or trailing slashes from the original paste.
       return prev
-        .replace(new RegExp(escaped + '\\s*\\/?', 'gi'), '')
+        .replace(new RegExp(escaped + '(?:\\/)*(?:[?#][^\\s]*)?', 'gi'), '')
         .replace(/\n\n+/g, '\n')
         .trim();
     });
@@ -1456,79 +1437,6 @@ export default function BulkDownloadSection({
           {browserPermissionHint}
         </p>
       </div>
-
-      {successResults.some((r) => (r.videos || []).some((v) => (v.label || v.quality || '') !== 'Standard')) && (
-            <div className="space-y-3 max-h-[360px] overflow-y-auto pr-1">
-              {successResults
-                .filter((r) => (r.videos || []).some((v) => (v.label || v.quality || '') !== 'Standard'))
-                .map((r) => {
-                  const videosToShow = (r.videos || []).filter((v) => (v.label || v.quality || '') !== 'Standard');
-                  if (videosToShow.length === 0) return null;
-                  return (
-                <div
-                  key={r.tweetUrl}
-                  className={`rounded-xl border px-3 sm:px-4 py-2 sm:py-3 ${themeVideoCardStyles[theme] || themeVideoCardStyles.dark}`}
-                >
-                  <div
-                    className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2"
-                    onClick={(e) => e.stopPropagation()}
-                    role="group"
-                    aria-label="Video download options"
-                  >
-                    {videosToShow.map((v, i) => {
-                      const hasValidHref = v?.url && typeof v.url === 'string' && v.url.startsWith('http');
-                      const label = v.label || v.quality || '';
-                      const ext = v.mediaType === 'photo' ? (v.ext || 'jpg') : 'mp4';
-                      const fileName = buildDownloadFileName(ext);
-                      return hasValidHref ? (
-                        <a
-                          key={i}
-                          href={v.url}
-                          download={fileName}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className={`flex items-center justify-center rounded-lg px-4 py-3 sm:py-2.5 min-h-[44px] text-sm font-medium transition-colors ${accentClass}`}
-                          title={v.url}
-                          onClick={async (e) => {
-                            const video = { ...v, tweetUrl: r.tweetUrl };
-                            if (downloadedPostKeysRef.current.has(getDownloadKey(video))) {
-                              e.preventDefault();
-                              setDownloadNotice(alreadyDownloadedLabel);
-                              return;
-                            }
-                            setDownloadNotice(null);
-                            await handleMediaDownloadClick(e, {
-                              url: v.url,
-                              filename: fileName,
-                              origin: typeof window !== 'undefined' ? window.location.origin : '',
-                              onBefore: handleGuestDownloadClick,
-                            });
-                            markDownloaded(video);
-                          }}
-                        >
-                          {downloadVideoLabel} {label}
-                        </a>
-                      ) : (
-                        <button
-                          key={i}
-                          type="button"
-                          onClick={() => {
-                            console.warn('[Download] Invalid video URL from API - object:', v);
-                            setError(linkExpiredLabel);
-                          }}
-                          disabled
-                          className={`flex items-center justify-center rounded-lg px-4 py-3 sm:py-2.5 min-h-[44px] text-sm font-medium transition-colors opacity-50 cursor-not-allowed ${accentClass}`}
-                        >
-                          {downloadVideoLabel} {label}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-                  );
-                })}
-            </div>
-      )}
     </section>
   );
 }
