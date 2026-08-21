@@ -1631,7 +1631,8 @@ export default function KamikazePage() {
           <div className="space-y-4 sm:space-y-6">
             {!visitorStats.tableReady && (
               <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-                Ziyaret kaydı için Supabase&apos;de <code className="bg-amber-100 px-1 rounded">013_site_visits.sql</code> migration&apos;ını çalıştırın.
+                Ziyaret kaydı için Supabase&apos;de <code className="bg-amber-100 px-1 rounded">013_site_visits.sql</code> ve{' '}
+                <code className="bg-amber-100 px-1 rounded">019_site_visit_totals.sql</code> migration&apos;larını çalıştırın.
               </div>
             )}
             {visitorStats.serviceRoleConfigured === false && (
@@ -1640,12 +1641,6 @@ export default function KamikazePage() {
                 RLS açıkken anon key ile ziyaret verisi okunamaz.
               </div>
             )}
-            {visitorStats.truncated && (
-              <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-                Çok fazla kayıt var; ilk 50.000 ziyaret gösteriliyor.
-              </div>
-            )}
-
             <div className="grid grid-cols-2 gap-2 sm:gap-6 max-w-xl">
               <div className="bg-white rounded-lg sm:rounded-xl border border-[#1d9bf0]/30 shadow-md p-2 sm:p-6 min-w-0">
                 <p className="text-[10px] sm:text-sm text-gray-600 mb-0.5 sm:mb-1 leading-tight">Tekil ziyaretçi</p>
@@ -1791,7 +1786,8 @@ export default function KamikazePage() {
           <div className="space-y-4 sm:space-y-6">
             {!visitorStats.tableReady && (
               <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-                Ziyaret kaydı için Supabase&apos;de <code className="bg-amber-100 px-1 rounded">013_site_visits.sql</code> migration&apos;ını çalıştırın.
+                Ziyaret kaydı için Supabase&apos;de <code className="bg-amber-100 px-1 rounded">013_site_visits.sql</code> ve{' '}
+                <code className="bg-amber-100 px-1 rounded">019_site_visit_totals.sql</code> migration&apos;larını çalıştırın.
               </div>
             )}
             {visitorStats.serviceRoleConfigured === false && (
