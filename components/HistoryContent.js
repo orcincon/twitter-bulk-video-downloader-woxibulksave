@@ -11,6 +11,15 @@ import {
 } from '@/lib/tweet-thumbnails.js';
 
 const ARCHIVE_THUMB_GAP_MS = 200;
+const LIVE_STATUS_CHUNK = 8;
+const LIVE_STATUS_GAP_MS = 250;
+const ARCHIVE_GONE_STATUSES = new Set(['suspended', 'account_deleted', 'tweet_deleted', 'missing']);
+const LIVE_STATUS_STYLES = {
+  suspended: 'bg-red-50 text-red-700 border-red-200',
+  account_deleted: 'bg-red-50 text-red-700 border-red-200',
+  tweet_deleted: 'bg-amber-50 text-amber-800 border-amber-200',
+  missing: 'bg-amber-50 text-amber-800 border-amber-200',
+};
 
 function isValidThumbUrl(value) {
   return typeof value === 'string' && value.startsWith('http');
@@ -89,6 +98,9 @@ const FALLBACK = {
   clearAllLabel: 'Tümünü Temizle',
   confirmClearMessage: 'Bu işlem geçmişinizi temizleyecektir, onaylıyor musunuz?',
   cancelLabel: 'İptal',
+  liveAccountSuspended: 'Hesap askıda',
+  liveAccountDeleted: 'Hesap silinmiş',
+  livePostDeleted: 'Gönderi silinmiş',
 };
 
 export default function HistoryContent({ lang = 'en', layout = {}, accentClass, theme = 'dark', isLoggedIn = false }) {
@@ -101,6 +113,7 @@ export default function HistoryContent({ lang = 'en', layout = {}, accentClass, 
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmPayload, setConfirmPayload] = useState(null);
   const [previewImage, setPreviewImage] = useState(null);
+  const [liveStatusByLogId, setLiveStatusByLogId] = useState({});
   const [softDeletingId, setSoftDeletingId] = useState(null);
   const [softDeletingAll, setSoftDeletingAll] = useState(false);
 
@@ -114,6 +127,12 @@ export default function HistoryContent({ lang = 'en', layout = {}, accentClass, 
   const clearAllLabel = t.clearAllLabel || FALLBACK.clearAllLabel;
   const confirmClearMessage = t.confirmClearMessage || FALLBACK.confirmClearMessage;
   const cancelLabel = t.cancelLabel || layout.common?.cancel || FALLBACK.cancelLabel;
+  const liveStatusLabels = {
+    suspended: t.liveAccountSuspended || FALLBACK.liveAccountSuspended,
+    account_deleted: t.liveAccountDeleted || FALLBACK.liveAccountDeleted,
+    tweet_deleted: t.livePostDeleted || FALLBACK.livePostDeleted,
+    missing: t.livePostDeleted || FALLBACK.livePostDeleted,
+  };
   const previewLabel =
     lang === 'tr' ? 'Önizleme' : lang === 'de' ? 'Vorschau' : lang === 'es' ? 'Vista previa' : 'Preview';
   const enlargeLabel =
@@ -141,6 +160,7 @@ export default function HistoryContent({ lang = 'en', layout = {}, accentClass, 
       setLogs([]);
       setArchiveThumbs({});
       setFetchedMetadata({});
+      setLiveStatusByLogId({});
       setLoading(false);
       return;
     }
@@ -184,8 +204,10 @@ export default function HistoryContent({ lang = 'en', layout = {}, accentClass, 
       .then((res) => res.json())
       .then((data) => {
         if (data?.ok) {
-          if (isAll) setLogs([]);
-          else setLogs((prev) => prev.filter((l) => l.id !== payload.logId));
+          if (isAll) {
+            setLogs([]);
+            setLiveStatusByLogId({});
+          } else setLogs((prev) => prev.filter((l) => l.id !== payload.logId));
         }
       })
       .finally(() => {
@@ -221,6 +243,43 @@ export default function HistoryContent({ lang = 'en', layout = {}, accentClass, 
 
         if (i < logs.length - 1) {
           await new Promise((resolve) => setTimeout(resolve, ARCHIVE_THUMB_GAP_MS));
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [logs]);
+
+  useEffect(() => {
+    if (!logs.length || typeof window === 'undefined') return undefined;
+    const ids = logs.map((log) => log?.id).filter(Boolean);
+    if (!ids.length) return undefined;
+
+    let cancelled = false;
+
+    (async () => {
+      for (let i = 0; i < ids.length; i += LIVE_STATUS_CHUNK) {
+        if (cancelled) return;
+        const chunk = ids.slice(i, i + LIVE_STATUS_CHUNK);
+        try {
+          const res = await fetch('/api/analysis-history/live-status', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ logIds: chunk }),
+          });
+          if (cancelled || !res.ok) continue;
+          const data = await res.json().catch(() => null);
+          const byLogId = data?.byLogId && typeof data.byLogId === 'object' ? data.byLogId : null;
+          if (!byLogId) continue;
+          setLiveStatusByLogId((prev) => ({ ...prev, ...byLogId }));
+        } catch {
+          /* ignore */
+        }
+        if (i + LIVE_STATUS_CHUNK < ids.length) {
+          await new Promise((resolve) => setTimeout(resolve, LIVE_STATUS_GAP_MS));
         }
       }
     })();
@@ -395,6 +454,17 @@ export default function HistoryContent({ lang = 'en', layout = {}, accentClass, 
                 created_at={card.metadata?.created_at ?? card.created_at}
                 created_timestamp={card.metadata?.created_timestamp}
               />
+              {(() => {
+                const st = liveStatusByLogId[card.log.id];
+                if (!st?.status || !ARCHIVE_GONE_STATUSES.has(st.status)) return null;
+                const cls = LIVE_STATUS_STYLES[st.status] || LIVE_STATUS_STYLES.missing;
+                const label = liveStatusLabels[st.status] || st.label;
+                return (
+                  <span className={`inline-flex mt-1.5 px-2 py-0.5 rounded-full text-[11px] font-semibold border ${cls}`}>
+                    {label}
+                  </span>
+                );
+              })()}
             </div>
             <div className="flex flex-row items-center gap-2 shrink-0 ml-auto">
               <Link
