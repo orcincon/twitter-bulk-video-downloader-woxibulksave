@@ -46,6 +46,7 @@ function isMissingRpcError(error) {
 function emptyPayload(serviceRoleConfigured, tableReady = true) {
   return {
     uniqueVisitors: 0,
+    returningVisitors: 0,
     totalVisits: 0,
     pages: [],
     referrers: [],
@@ -140,6 +141,7 @@ function payloadFromRpc(data, serviceRoleConfigured) {
   const raw = typeof data === 'string' ? JSON.parse(data) : data || {};
   return {
     uniqueVisitors: Number(raw.uniqueVisitors) || 0,
+    returningVisitors: Number(raw.returningVisitors) || 0,
     totalVisits: Number(raw.totalVisits) || 0,
     pages: mapRpcPages(raw.pages),
     referrers: mapRpcReferrers(raw.referrers),
@@ -157,13 +159,17 @@ async function fetchSummaryStats(supabase) {
 
   if (dailyError) return { error: dailyError, payload: null };
 
-  const [pagesRes, referrersRes, uniqueRes] = await Promise.all([
+  const [pagesRes, referrersRes, uniqueRes, returningRes] = await Promise.all([
     supabase.from('site_visit_pages').select('path, visits, unique_visitors'),
     supabase.from('site_visit_referrers').select('referrer, visits, unique_visitors'),
     supabase.from('site_visit_visitors').select('*', { count: 'exact', head: true }),
+    supabase
+      .from('site_visit_visitors')
+      .select('*', { count: 'exact', head: true })
+      .gte('visit_count', 2),
   ]);
 
-  const error = pagesRes.error || referrersRes.error || uniqueRes.error;
+  const error = pagesRes.error || referrersRes.error || uniqueRes.error || returningRes.error;
   if (error) return { error, payload: null };
 
   const totalVisits = (daily || []).reduce((sum, row) => sum + (Number(row.visits) || 0), 0);
@@ -172,6 +178,7 @@ async function fetchSummaryStats(supabase) {
     error: null,
     payload: {
       uniqueVisitors: uniqueRes.count ?? 0,
+      returningVisitors: returningRes.count ?? 0,
       totalVisits,
       pages: mapRpcPages(
         (pagesRes.data || []).map((p) => ({
@@ -190,6 +197,15 @@ async function fetchSummaryStats(supabase) {
       daily: fillDailyWindow(daily),
     },
   };
+}
+
+async function fetchReturningCount(supabase) {
+  const { count, error } = await supabase
+    .from('site_visit_visitors')
+    .select('*', { count: 'exact', head: true })
+    .gte('visit_count', 2);
+  if (error) return 0;
+  return count ?? 0;
 }
 
 async function fetchExactTotal(supabase) {
@@ -224,12 +240,14 @@ async function fetchAllSiteVisits(supabase) {
 
 function aggregateVisits(rows) {
   const uniqueVisitors = new Set();
+  const visitCounts = new Map();
   const pageMap = new Map();
   const referrerMap = new Map();
 
   for (const row of rows) {
     const visitorKey = String(row.visitor_key || 'anon:unknown');
     uniqueVisitors.add(visitorKey);
+    visitCounts.set(visitorKey, (visitCounts.get(visitorKey) || 0) + 1);
 
     const path = normalizePath(row.path);
     let page = pageMap.get(path);
@@ -274,8 +292,14 @@ function aggregateVisits(rows) {
     }))
     .sort((a, b) => b.visits - a.visits || a.label.localeCompare(b.label, 'tr'));
 
+  let returningVisitors = 0;
+  for (const count of visitCounts.values()) {
+    if (count >= 2) returningVisitors += 1;
+  }
+
   return {
     uniqueVisitors: uniqueVisitors.size,
+    returningVisitors,
     totalVisits: rows.length,
     pages,
     referrers,
@@ -323,7 +347,11 @@ export async function GET() {
     });
 
     if (!rpcError && rpcData) {
-      return NextResponse.json(payloadFromRpc(rpcData, serviceRoleConfigured));
+      const payload = payloadFromRpc(rpcData, serviceRoleConfigured);
+      if (!payload.returningVisitors) {
+        payload.returningVisitors = await fetchReturningCount(supabase);
+      }
+      return NextResponse.json(payload);
     }
 
     if (rpcError && !isMissingRpcError(rpcError) && isMissingTableError(rpcError)) {

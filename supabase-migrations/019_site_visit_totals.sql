@@ -234,7 +234,8 @@ AS $$
 WITH totals AS (
   SELECT
     COALESCE((SELECT SUM(visits)::bigint FROM site_visit_daily), 0) AS total_visits,
-    COALESCE((SELECT COUNT(*)::bigint FROM site_visit_visitors), 0) AS unique_visitors
+    COALESCE((SELECT COUNT(*)::bigint FROM site_visit_visitors), 0) AS unique_visitors,
+    COALESCE((SELECT COUNT(*)::bigint FROM site_visit_visitors WHERE visit_count >= 2), 0) AS returning_visitors
 ),
 pages AS (
   SELECT COALESCE(jsonb_agg(to_jsonb(p) ORDER BY p.visits DESC, p.path ASC), '[]'::jsonb) AS data
@@ -280,6 +281,7 @@ daily AS (
 SELECT jsonb_build_object(
   'totalVisits', (SELECT total_visits FROM totals),
   'uniqueVisitors', (SELECT unique_visitors FROM totals),
+  'returningVisitors', (SELECT returning_visitors FROM totals),
   'pages', (SELECT data FROM pages),
   'referrers', (SELECT data FROM referrers),
   'daily', (SELECT data FROM daily)
@@ -291,4 +293,4 @@ GRANT EXECUTE ON FUNCTION kamikaze_visitor_stats(integer) TO service_role;
 REVOKE ALL ON FUNCTION kamikaze_normalize_visit_path(text) FROM PUBLIC, anon, authenticated;
 
 COMMENT ON FUNCTION record_site_visit(text, text, text) IS 'WBS: sayfa görüntülemeyi sayaçlara yazar, ham satır tutmaz.';
-COMMENT ON FUNCTION kamikaze_visitor_stats(integer) IS 'WBS Kamikaze: özet tablolardan toplam/tekil/sayfa/referans/günlük.';
+COMMENT ON FUNCTION kamikaze_visitor_stats(integer) IS 'WBS Kamikaze: özet tablolardan toplam/tekil/geri gelen/sayfa/referans/günlük.';

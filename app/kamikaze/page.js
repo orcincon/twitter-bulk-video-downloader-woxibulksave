@@ -97,6 +97,27 @@ const DAILY_SORT_GETTERS = {
 
 const GONE_LIVE_STATUSES = new Set(['tweet_deleted', 'account_deleted', 'suspended', 'missing']);
 
+function filterGoneLogs(rows, liveStatusByTweetId) {
+  return rows.filter((row) => {
+    const tweetId = extractTweetId(row.url);
+    const status = tweetId ? liveStatusByTweetId[tweetId]?.status : null;
+    return GONE_LIVE_STATUSES.has(status);
+  });
+}
+
+function countLiveStatus(rows, liveStatusByTweetId) {
+  let gone = 0;
+  let checked = 0;
+  for (const row of rows) {
+    const tweetId = extractTweetId(row.url);
+    const st = tweetId ? liveStatusByTweetId[tweetId] : null;
+    if (!st) continue;
+    checked += 1;
+    if (GONE_LIVE_STATUSES.has(st.status)) gone += 1;
+  }
+  return { gone, checked };
+}
+
 const LIVE_STATUS_STYLES = {
   ok: 'bg-green-50 text-green-700',
   tweet_deleted: 'bg-amber-50 text-amber-800',
@@ -144,6 +165,7 @@ export default function KamikazePage() {
   const [savingUser, setSavingUser] = useState(false);
   const [visitorStats, setVisitorStats] = useState({
     uniqueVisitors: 0,
+    returningVisitors: 0,
     totalVisits: 0,
     pages: [],
     referrers: [],
@@ -168,6 +190,7 @@ export default function KamikazePage() {
   const [liveStatusByTweetId, setLiveStatusByTweetId] = useState({});
   const [checkingLiveStatus, setCheckingLiveStatus] = useState(false);
   const [liveStatusFilter, setLiveStatusFilter] = useState('all');
+  const [hiddenLiveStatusFilter, setHiddenLiveStatusFilter] = useState('all');
   const [liveCheckProgress, setLiveCheckProgress] = useState({ done: 0, total: 0 });
 
   const openConfirm = (dialog) => {
@@ -337,6 +360,7 @@ export default function KamikazePage() {
       if (!res.ok) {
         setVisitorStats({
           uniqueVisitors: 0,
+          returningVisitors: 0,
           totalVisits: 0,
           pages: [],
           referrers: [],
@@ -350,6 +374,7 @@ export default function KamikazePage() {
       const data = await res.json();
       setVisitorStats({
         uniqueVisitors: data.uniqueVisitors ?? 0,
+        returningVisitors: data.returningVisitors ?? 0,
         totalVisits: data.totalVisits ?? 0,
         pages: data.pages ?? [],
         referrers: data.referrers ?? [],
@@ -361,6 +386,7 @@ export default function KamikazePage() {
     } catch {
       setVisitorStats({
         uniqueVisitors: 0,
+        returningVisitors: 0,
         totalVisits: 0,
         pages: [],
         referrers: [],
@@ -438,6 +464,18 @@ export default function KamikazePage() {
     }
   };
 
+  const renderLiveStatusBadge = (row) => {
+    const tweetId = extractTweetId(row.url);
+    const st = tweetId ? liveStatusByTweetId[tweetId] : null;
+    if (!st) return <span className="text-gray-400">—</span>;
+    const cls = LIVE_STATUS_STYLES[st.status] || LIVE_STATUS_STYLES.unknown;
+    return (
+      <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-semibold whitespace-nowrap ${cls}`}>
+        {st.label}
+      </span>
+    );
+  };
+
   const toggleRow = (rowId) => {
     setSelectedRowIds((prev) => {
       const next = new Set(prev);
@@ -449,12 +487,13 @@ export default function KamikazePage() {
 
   const filteredRecentLogs = useMemo(() => {
     if (liveStatusFilter !== 'gone') return stats.recentLogs;
-    return stats.recentLogs.filter((row) => {
-      const tweetId = extractTweetId(row.url);
-      const status = tweetId ? liveStatusByTweetId[tweetId]?.status : null;
-      return GONE_LIVE_STATUSES.has(status);
-    });
+    return filterGoneLogs(stats.recentLogs, liveStatusByTweetId);
   }, [stats.recentLogs, liveStatusFilter, liveStatusByTweetId]);
+
+  const filteredHiddenLogs = useMemo(() => {
+    if (hiddenLiveStatusFilter !== 'gone') return hiddenLogs;
+    return filterGoneLogs(hiddenLogs, liveStatusByTweetId);
+  }, [hiddenLogs, hiddenLiveStatusFilter, liveStatusByTweetId]);
 
   const sortedUsers = useMemo(() => sortRows(users, usersSort, USER_SORT_GETTERS), [users, usersSort]);
   const sortedGuests = useMemo(() => sortRows(guests, guestsSort, GUEST_SORT_GETTERS), [guests, guestsSort]);
@@ -555,24 +594,21 @@ export default function KamikazePage() {
     });
   };
 
-  const liveStatusCounts = useMemo(() => {
-    let gone = 0;
-    let checked = 0;
-    for (const row of stats.recentLogs) {
-      const tweetId = extractTweetId(row.url);
-      const st = tweetId ? liveStatusByTweetId[tweetId] : null;
-      if (!st) continue;
-      checked += 1;
-      if (GONE_LIVE_STATUSES.has(st.status)) gone += 1;
-    }
-    return { gone, checked };
-  }, [stats.recentLogs, liveStatusByTweetId]);
+  const liveStatusCounts = useMemo(
+    () => countLiveStatus(stats.recentLogs, liveStatusByTweetId),
+    [stats.recentLogs, liveStatusByTweetId]
+  );
+
+  const hiddenLiveStatusCounts = useMemo(
+    () => countLiveStatus(hiddenLogs, liveStatusByTweetId),
+    [hiddenLogs, liveStatusByTweetId]
+  );
 
   const checkLiveStatus = async () => {
-    const source =
-      selectedRowIds.size > 0
-        ? filteredRecentLogs.filter((row) => selectedRowIds.has(row.id))
-        : filteredRecentLogs;
+    const isHidden = activeTab === 'hidden';
+    const rows = isHidden ? filteredHiddenLogs : filteredRecentLogs;
+    const selected = isHidden ? selectedHiddenRowIds : selectedRowIds;
+    const source = selected.size > 0 ? rows.filter((row) => selected.has(row.id)) : rows;
     const items = [];
     const seen = new Set();
     for (const row of source) {
@@ -620,7 +656,7 @@ export default function KamikazePage() {
   };
 
   const allHiddenLogsSelected =
-    hiddenLogs.length > 0 && hiddenLogs.every((r) => selectedHiddenRowIds.has(r.id));
+    filteredHiddenLogs.length > 0 && filteredHiddenLogs.every((r) => selectedHiddenRowIds.has(r.id));
 
   const toggleHiddenRow = (rowId) => {
     setSelectedHiddenRowIds((prev) => {
@@ -633,14 +669,14 @@ export default function KamikazePage() {
 
   const toggleAllHidden = () => {
     setSelectedHiddenRowIds((prev) => {
-      if (hiddenLogs.length === 0) return prev;
-      if (hiddenLogs.every((r) => prev.has(r.id))) {
+      if (filteredHiddenLogs.length === 0) return prev;
+      if (filteredHiddenLogs.every((r) => prev.has(r.id))) {
         const next = new Set(prev);
-        hiddenLogs.forEach((r) => next.delete(r.id));
+        filteredHiddenLogs.forEach((r) => next.delete(r.id));
         return next;
       }
       const next = new Set(prev);
-      hiddenLogs.forEach((r) => next.add(r.id));
+      filteredHiddenLogs.forEach((r) => next.add(r.id));
       return next;
     });
   };
@@ -1334,17 +1370,7 @@ export default function KamikazePage() {
                             )}
                           </td>
                           <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 align-middle">
-                            {(() => {
-                              const tweetId = extractTweetId(row.url);
-                              const st = tweetId ? liveStatusByTweetId[tweetId] : null;
-                              if (!st) return <span className="text-gray-400">—</span>;
-                              const cls = LIVE_STATUS_STYLES[st.status] || LIVE_STATUS_STYLES.unknown;
-                              return (
-                                <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-semibold whitespace-nowrap ${cls}`}>
-                                  {st.label}
-                                </span>
-                              );
-                            })()}
+                            {renderLiveStatusBadge(row)}
                           </td>
                           <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 text-xs truncate max-w-[90px] sm:max-w-[160px] align-middle">
                             {row.user_username ? (
@@ -1719,12 +1745,19 @@ export default function KamikazePage() {
                 RLS açıkken anon key ile ziyaret verisi okunamaz.
               </div>
             )}
-            <div className="grid grid-cols-2 gap-2 sm:gap-6 max-w-xl">
+            <div className="grid grid-cols-3 gap-2 sm:gap-6 max-w-3xl">
               <div className="bg-white rounded-lg sm:rounded-xl border border-[#1d9bf0]/30 shadow-md p-2 sm:p-6 min-w-0">
                 <p className="text-[10px] sm:text-sm text-gray-600 mb-0.5 sm:mb-1 leading-tight">Tekil ziyaretçi</p>
                 <p className="text-lg sm:text-3xl font-bold text-gray-900 tabular-nums">
                   {loadingVisitors ? '…' : visitorStats.uniqueVisitors}
                 </p>
+              </div>
+              <div className="bg-white rounded-lg sm:rounded-xl border border-[#1d9bf0]/30 shadow-md p-2 sm:p-6 min-w-0">
+                <p className="text-[10px] sm:text-sm text-gray-600 mb-0.5 sm:mb-1 leading-tight">Geri gelen</p>
+                <p className="text-lg sm:text-3xl font-bold text-gray-900 tabular-nums">
+                  {loadingVisitors ? '…' : visitorStats.returningVisitors}
+                </p>
+                <p className="text-[9px] sm:text-xs text-gray-500 mt-0.5 sm:mt-1 leading-tight">2+ ziyaret</p>
               </div>
               <div className="bg-white rounded-lg sm:rounded-xl border border-[#1d9bf0]/30 shadow-md p-2 sm:p-6 min-w-0">
                 <p className="text-[10px] sm:text-sm text-gray-600 mb-0.5 sm:mb-1 leading-tight">Toplam ziyaret</p>
@@ -1984,7 +2017,7 @@ export default function KamikazePage() {
                 <span className="text-sm font-semibold tabular-nums text-gray-700 whitespace-nowrap">
                   {hiddenPagination.totalRecentRows}
                 </span>
-                {hiddenLogs.length > 0 && (
+                {filteredHiddenLogs.length > 0 && (
                   <button
                     type="button"
                     onClick={toggleAllHidden}
@@ -1992,6 +2025,32 @@ export default function KamikazePage() {
                   >
                     {allHiddenLogsSelected ? 'Seçimi kaldır' : 'Tümünü seç'}
                   </button>
+                )}
+                <button
+                  type="button"
+                  onClick={checkLiveStatus}
+                  disabled={checkingLiveStatus || filteredHiddenLogs.length === 0}
+                  className="px-3 py-1.5 text-sm font-medium rounded-lg border border-[#1d9bf0]/40 text-[#1d9bf0] hover:bg-[#1d9bf0]/5 disabled:opacity-50"
+                  title={selectedHiddenRowIds.size > 0 ? 'Seçilen gönderileri X üzerinde kontrol et' : 'Bu sayfadaki gönderileri X üzerinde kontrol et'}
+                >
+                  {checkingLiveStatus
+                    ? `Taranıyor ${liveCheckProgress.done}/${liveCheckProgress.total}`
+                    : selectedHiddenRowIds.size > 0
+                      ? `Silinmişleri tara (${selectedHiddenRowIds.size})`
+                      : 'Silinmişleri tara'}
+                </button>
+                {hiddenLiveStatusCounts.checked > 0 && (
+                  <label className="flex items-center gap-2 min-w-0">
+                    <span className="sr-only">Durum filtresi</span>
+                    <select
+                      value={hiddenLiveStatusFilter}
+                      onChange={(e) => setHiddenLiveStatusFilter(e.target.value)}
+                      className="w-[9.5rem] sm:w-40 max-w-full px-2.5 py-1.5 text-sm rounded-lg border border-gray-200 bg-white text-gray-800 focus:outline-none focus:ring-2 focus:ring-[#1d9bf0]/30 focus:border-[#1d9bf0]"
+                    >
+                      <option value="all">Tüm durumlar</option>
+                      <option value="gone">Silinmiş / askıda ({hiddenLiveStatusCounts.gone})</option>
+                    </select>
+                  </label>
                 )}
                 {selectedHiddenRowIds.size > 0 && (
                   <>
@@ -2029,6 +2088,7 @@ export default function KamikazePage() {
                         />
                       </th>
                       <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium">Önizleme</th>
+                      <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium w-28">Durum</th>
                       <SortableTh
                         label="X"
                         field="user"
@@ -2064,10 +2124,20 @@ export default function KamikazePage() {
                   <tbody>
                     {hiddenLogs.length === 0 ? (
                       <tr>
-                        <td colSpan={7} className="px-4 lg:px-8 py-12 text-center text-gray-500">Soft silinen kayıt yok.</td>
+                        <td colSpan={8} className="px-4 lg:px-8 py-12 text-center text-gray-500">Soft silinen kayıt yok.</td>
+                      </tr>
+                    ) : filteredHiddenLogs.length === 0 ? (
+                      <tr>
+                        <td colSpan={8} className="px-4 lg:px-8 py-12 text-center text-gray-500">
+                          {hiddenLiveStatusFilter === 'gone'
+                            ? 'Bu sayfada silinmiş veya askıdaki gönderi yok. Önce taramayı çalıştırın.'
+                            : hiddenUsernameFilterMode === 'exclude'
+                            ? 'Hariç tutulan kullanıcı dışında kayıt bulunamadı.'
+                            : 'Bu kullanıcı adına ait kayıt bulunamadı.'}
+                        </td>
                       </tr>
                     ) : (
-                      hiddenLogs.map((row) => (
+                      filteredHiddenLogs.map((row) => (
                         <tr key={row.id} className="border-t border-gray-100 hover:bg-gray-50/50">
                           <td className="px-2 sm:px-3 py-2 sm:py-3 align-middle">
                             <input
@@ -2092,6 +2162,9 @@ export default function KamikazePage() {
                             ) : (
                               <span className="w-12 h-12 sm:w-14 sm:h-14 lg:w-16 lg:h-16 rounded-lg bg-gray-200 flex items-center justify-center text-gray-400 text-xs shrink-0">—</span>
                             )}
+                          </td>
+                          <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 align-middle">
+                            {renderLiveStatusBadge(row)}
                           </td>
                           <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 text-xs truncate max-w-[90px] sm:max-w-[160px] align-middle">
                             {row.user_username ? (
