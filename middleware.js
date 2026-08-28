@@ -5,8 +5,6 @@ import { getClientIp, getUserAgent } from './lib/request-client.js';
 import { isKamikazeSession } from './lib/kamikaze-session.js';
 
 const DEFAULT_SITE = 'woxibulksave.com';
-const CANONICAL_HOST = 'www.woxibulksave.com';
-const APEX_REDIRECT_HOSTS = new Set(['woxibulksave.com']);
 const HOST_ALIASES = { 'www.woxibulksave.com': DEFAULT_SITE };
 
 const VALID_PAGE_PATHS = new Set([
@@ -78,20 +76,7 @@ function queuePageVisit(request, path, event) {
   }
 }
 
-function redirectApexToWww(request) {
-  const hostname = (request.headers.get('host') || '').split(':')[0].toLowerCase();
-  if (!APEX_REDIRECT_HOSTS.has(hostname)) return null;
-  const url = request.nextUrl.clone();
-  url.hostname = CANONICAL_HOST;
-  url.protocol = 'https:';
-  url.port = '';
-  return NextResponse.redirect(url, 308);
-}
-
 export async function middleware(request, event) {
-  const apexRedirect = redirectApexToWww(request);
-  if (apexRedirect) return apexRedirect;
-
   const { pathname } = request.nextUrl;
   const path = normalizePath(pathname);
 
@@ -119,5 +104,5 @@ export async function middleware(request, event) {
 }
 
 export const config = {
-  matcher: ['/((?!_next/static|_next/image|favicon.ico|icon|apple-icon).*)'],
+  matcher: ['/((?!_next/static|_next/image|favicon.ico|icon|apple-icon|api/auth).*)'],
 };
