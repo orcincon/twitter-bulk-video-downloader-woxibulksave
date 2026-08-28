@@ -5,7 +5,8 @@ import { signIn } from 'next-auth/react';
 /** Tıklanınca X (Twitter) girişine yönlendiren buton (erişilebilirlik: aksiyon için <button> kullanılıyor). */
 export default function SignInLink({ children, className = '' }) {
   const handleClick = () => {
-    const url = typeof window !== 'undefined' ? window.location.href : '/';
+    const url =
+      typeof window !== 'undefined' ? `${window.location.pathname}${window.location.search}` || '/' : '/';
     signIn('twitter', { callbackUrl: url });
   };
 

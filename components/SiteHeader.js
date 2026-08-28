@@ -19,7 +19,7 @@ export default function SiteHeader({ accentClass, layout = {}, lang = 'en', isLo
           {!isLoggedIn ? (
             <Link
               href={faqHref}
-              className="flex items-center justify-center min-w-[44px] min-h-[44px] px-2.5 rounded-lg border border-slate-200 bg-white text-xs font-bold text-slate-700 hover:bg-slate-50 transition"
+              className="hidden sm:flex items-center justify-center min-w-[44px] min-h-[44px] px-2.5 rounded-lg border border-slate-200 bg-white text-xs font-bold text-slate-700 hover:bg-slate-50 transition"
             >
               {faqLabel}
             </Link>

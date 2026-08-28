@@ -49,7 +49,9 @@ export default function SignInToast({ open, variant, onClose, lang = 'tr', layou
   const closeLabel = common.close || FALLBACK.close[l] || FALLBACK.close.en;
 
   const handleSignIn = () => {
-    signIn('twitter', { callbackUrl: typeof window !== 'undefined' ? window.location.href : '/' });
+    const callbackUrl =
+      typeof window !== 'undefined' ? `${window.location.pathname}${window.location.search}` || '/' : '/';
+    signIn('twitter', { callbackUrl });
   };
 
   return (

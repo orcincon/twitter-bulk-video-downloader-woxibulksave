@@ -5,7 +5,14 @@ import Link from 'next/link';
 import { signIn, signOut, useSession } from 'next-auth/react';
 
 const ICON_ONLY_CLASS =
-  'x-button text-white inline-flex items-center justify-center rounded-full w-11 h-11 min-h-[44px] min-w-[44px] p-0 hover:opacity-90 transition shadow-lg';
+  'x-button text-white inline-flex items-center justify-center rounded-full min-h-[44px] min-w-[44px] h-11 px-3 gap-1.5 sm:w-11 sm:px-0 sm:gap-0 hover:opacity-90 transition shadow-lg';
+
+const COMPACT_SIGN_IN = { tr: 'Giriş', en: 'Sign in', de: 'Anmelden', es: 'Entrar' };
+
+function callbackPath() {
+  if (typeof window === 'undefined') return '/';
+  return `${window.location.pathname}${window.location.search}` || '/';
+}
 
 export default function AuthButton({
   accentClass = 'bg-[#1d9bf0] hover:bg-[#1686d4] text-white border border-[#1d9bf0]',
@@ -41,7 +48,7 @@ export default function AuthButton({
   if (status === 'loading') {
     return (
       <div
-        className={`bg-gray-200 animate-pulse ${iconOnly ? 'w-11 h-11 min-h-[44px] min-w-[44px] rounded-full' : 'min-h-[44px] min-w-[120px] rounded-lg'}`}
+        className={`bg-gray-200 animate-pulse ${iconOnly ? 'h-11 min-h-[44px] w-[4.75rem] sm:w-11 min-w-[44px] rounded-full' : 'min-h-[44px] min-w-[120px] rounded-lg'}`}
         aria-hidden
       />
     );
@@ -115,12 +122,16 @@ export default function AuthButton({
   return (
     <button
       type="button"
-      onClick={() => signIn('twitter', { callbackUrl: '/' })}
+      onClick={() => signIn('twitter', { callbackUrl: callbackPath() })}
       className={btnClass}
-      aria-label={iconOnly ? signInLabel : undefined}
+      aria-label={signInLabel}
     >
       {xLogo}
-      {!iconOnly ? <span>{signInLabel}</span> : null}
+      {iconOnly ? (
+        <span className="sm:hidden text-xs font-bold whitespace-nowrap">{COMPACT_SIGN_IN[lang] || COMPACT_SIGN_IN.en}</span>
+      ) : (
+        <span>{signInLabel}</span>
+      )}
     </button>
   );
 }

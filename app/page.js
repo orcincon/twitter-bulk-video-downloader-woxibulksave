@@ -70,7 +70,6 @@ export default async function Home({ searchParams }) {
   const layout = getLayoutTranslations(lang, '');
   const logId = typeof params?.logId === 'string' && params.logId.length > 10 ? params.logId : null;
 
-  const headerSignInClass = 'x-button text-white inline-flex items-center justify-center rounded-full w-11 h-11 min-h-[44px] min-w-[44px] p-0 hover:opacity-90 transition shadow-lg';
   const historyHref = lang && lang !== 'en' ? `/gecmis?lang=${lang}` : '/gecmis';
   const h = layout.pages?.home || {};
 
@@ -86,7 +85,6 @@ export default async function Home({ searchParams }) {
           historyLabel={layout.header?.history}
           faqLabel={layout.footer?.faq}
           lang={lang}
-          signInClass={headerSignInClass}
           iconOnly
         />
       </SiteHeader>

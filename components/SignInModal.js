@@ -37,7 +37,9 @@ export default function SignInModal({ open, onClose, lang = 'en', accentClass, l
   }, [open]);
 
   const handleSignIn = () => {
-    signIn('twitter', { callbackUrl: typeof window !== 'undefined' ? window.location.href : '/' });
+    const callbackUrl =
+      typeof window !== 'undefined' ? `${window.location.pathname}${window.location.search}` || '/' : '/';
+    signIn('twitter', { callbackUrl });
   };
 
   return (
