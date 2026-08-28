@@ -1,10 +1,21 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import Link from 'next/link';
 import { formatBucketLabel } from '@/lib/visitor-stats.js';
 import ConfirmToast from '@/components/ConfirmToast.js';
+import SaveProgressModal from '@/components/SaveProgressModal.js';
 import { extractTweetId } from '@/lib/tweet-url.js';
+import { buildDownloadFileName } from '@/lib/download-filename.js';
+import { downloadMediaInBrowser, probeMediaBytes, isDownloadAborted } from '@/lib/client-download.js';
+import { collapseDistinctVideos } from '@/lib/tweet-media.js';
+import {
+  createDownloadProgressTracker,
+  createDownloadAbortedError,
+  waitWhilePaused,
+  delayWithControl,
+  runCancellableFile,
+} from '@/lib/download-progress.js';
 
 function compareSortValues(a, b, dir) {
   const mul = dir === 'asc' ? 1 : -1;
@@ -161,6 +172,12 @@ export default function KamikazePage() {
   const [syncingUsernames, setSyncingUsernames] = useState(false);
   const [usernameSyncMessage, setUsernameSyncMessage] = useState('');
   const [actionError, setActionError] = useState('');
+  const [downloadingRowId, setDownloadingRowId] = useState(null);
+  const [downloadStats, setDownloadStats] = useState({ loaded: 0, total: 0, percent: 0, current: 0, fileCount: 0 });
+  const [downloadPhase, setDownloadPhase] = useState('idle');
+  const [downloadPaused, setDownloadPaused] = useState(false);
+  const downloadControlRef = useRef({ status: 'idle', abort: null, wake: null });
+  const analyzeAbortRef = useRef(null);
   const [editingUser, setEditingUser] = useState(null);
   const [savingUser, setSavingUser] = useState(false);
   const [visitorStats, setVisitorStats] = useState({
@@ -581,6 +598,109 @@ export default function KamikazePage() {
       onSoftConfirm: () => deleteLogs([row.log_id], 'soft'),
       onHardConfirm: () => deleteLogs([row.log_id], 'hard'),
     });
+  };
+
+  const pauseDownload = useCallback(() => {
+    const status = downloadControlRef.current.status;
+    if (status !== 'running' && status !== 'analyzing') return;
+    downloadControlRef.current.status = 'paused';
+    setDownloadPaused(true);
+    if (status === 'running') downloadControlRef.current.abort?.abort();
+  }, []);
+
+  const resumeDownload = useCallback(() => {
+    if (downloadControlRef.current.status !== 'paused') return;
+    downloadControlRef.current.status = 'running';
+    setDownloadPaused(false);
+    downloadControlRef.current.wake?.();
+  }, []);
+
+  const cancelDownload = useCallback(() => {
+    downloadControlRef.current.status = 'cancelled';
+    setDownloadPaused(false);
+    analyzeAbortRef.current?.abort();
+    downloadControlRef.current.abort?.abort();
+    downloadControlRef.current.wake?.();
+  }, []);
+
+  const handleDownloadRow = async (row) => {
+    if (!row?.url || downloadingRowId) return;
+    setDownloadingRowId(row.id);
+    setDownloadPhase('analyze');
+    setDownloadPaused(false);
+    setDownloadStats({ loaded: 0, total: 0, percent: 0, current: 0, fileCount: 0 });
+    setActionError('');
+    downloadControlRef.current = { status: 'analyzing', abort: null, wake: null };
+    const analyzeAbort = new AbortController();
+    analyzeAbortRef.current = analyzeAbort;
+    try {
+      const res = await fetch('/api/download', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' },
+        body: JSON.stringify({ urls: [row.url] }),
+        cache: 'no-store',
+        credentials: 'include',
+        signal: analyzeAbort.signal,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (downloadControlRef.current.status === 'cancelled') throw createDownloadAbortedError();
+      if (!res.ok || !data?.success) {
+        setActionError(data?.error || 'Video indirilemedi.');
+        return;
+      }
+      const result = Array.isArray(data.results) ? data.results[0] : null;
+      const videos = collapseDistinctVideos(result?.videos || []).filter(
+        (v) => v?.url && typeof v.url === 'string' && v.url.startsWith('http') && v.mediaType !== 'photo'
+      );
+      if (!videos.length) {
+        setActionError(result?.error || 'Bu gönderide indirilebilir video yok.');
+        return;
+      }
+      await waitWhilePaused(downloadControlRef);
+      if (downloadControlRef.current.status === 'cancelled') throw createDownloadAbortedError();
+      if (downloadControlRef.current.status !== 'paused') {
+        downloadControlRef.current.status = 'running';
+      }
+      setDownloadPhase('save');
+      setDownloadStats({ loaded: 0, total: 0, percent: 1, current: 1, fileCount: videos.length });
+      const tracker = createDownloadProgressTracker(videos.length, setDownloadStats);
+      videos.forEach((video, index) => {
+        probeMediaBytes(video.url).then((bytes) => tracker.setProbedSize(index, bytes));
+      });
+      const origin = typeof window !== 'undefined' ? window.location.origin : '';
+      for (let i = 0; i < videos.length; i += 1) {
+        if (downloadControlRef.current.status === 'cancelled') throw createDownloadAbortedError();
+        await waitWhilePaused(downloadControlRef);
+        if (downloadControlRef.current.status === 'cancelled') throw createDownloadAbortedError();
+        const video = videos[i];
+        tracker.startFile(i);
+        let lastReceived = 0;
+        const savedBytes = await runCancellableFile(downloadControlRef, (signal) =>
+          downloadMediaInBrowser(video.url, buildDownloadFileName('mp4'), origin, {
+            signal,
+            onProgress: (info) => {
+              lastReceived = info?.received || 0;
+              tracker.onFileProgress(i, info);
+            },
+          })
+        );
+        tracker.finishFile(i, savedBytes || lastReceived);
+        if (i < videos.length - 1) await delayWithControl(400, downloadControlRef);
+      }
+      if (downloadControlRef.current.status === 'cancelled') throw createDownloadAbortedError();
+      tracker.complete();
+    } catch (err) {
+      if (!isDownloadAborted(err) && downloadControlRef.current.status !== 'cancelled') {
+        setActionError('Video indirilemedi.');
+      }
+    } finally {
+      analyzeAbortRef.current = null;
+      downloadControlRef.current = { status: 'idle', abort: null, wake: null };
+      setDownloadPaused(false);
+      setDownloadingRowId(null);
+      setDownloadPhase('idle');
+      setDownloadStats({ loaded: 0, total: 0, percent: 0, current: 0, fileCount: 0 });
+    }
   };
 
   const handleBulkDelete = () => {
@@ -1316,6 +1436,7 @@ export default function KamikazePage() {
                         onSort={handleLogsSort}
                         className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3"
                       />
+                      <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium w-14">İndir</th>
                       <SortableTh
                         label="Video"
                         field="video_count"
@@ -1330,11 +1451,11 @@ export default function KamikazePage() {
                   <tbody>
                     {stats.recentLogs.length === 0 ? (
                       <tr>
-                        <td colSpan={8} className="px-4 lg:px-8 py-12 text-center text-gray-500">Henüz kayıt yok.</td>
+                        <td colSpan={9} className="px-4 lg:px-8 py-12 text-center text-gray-500">Henüz kayıt yok.</td>
                       </tr>
                     ) : filteredRecentLogs.length === 0 ? (
                       <tr>
-                        <td colSpan={8} className="px-4 lg:px-8 py-12 text-center text-gray-500">
+                        <td colSpan={9} className="px-4 lg:px-8 py-12 text-center text-gray-500">
                           {liveStatusFilter === 'gone'
                             ? 'Bu sayfada silinmiş veya askıdaki gönderi yok. Önce taramayı çalıştırın.'
                             : logsUsernameFilterMode === 'exclude'
@@ -1407,6 +1528,26 @@ export default function KamikazePage() {
                             ) : (
                               <span className="text-gray-400">—</span>
                             )}
+                          </td>
+                          <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 align-middle">
+                            <button
+                              type="button"
+                              onClick={() => handleDownloadRow(row)}
+                              disabled={!row.url || Boolean(downloadingRowId)}
+                              className="p-1.5 rounded text-[#1d9bf0] hover:bg-[#1d9bf0]/10 disabled:opacity-50"
+                              title="Videoyu indir"
+                              aria-label="İndir"
+                            >
+                              {downloadingRowId === row.id ? (
+                                <span className="min-w-[2.25rem] text-xs font-bold tabular-nums">
+                                  {downloadPhase === 'save' ? `${Math.max(0, downloadStats.percent)}%` : '…'}
+                                </span>
+                              ) : (
+                                <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5 5-5M12 15V3" />
+                                </svg>
+                              )}
+                            </button>
                           </td>
                           <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 align-middle">{row.video_count ?? 0}</td>
                           <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 align-middle">
@@ -2343,6 +2484,20 @@ export default function KamikazePage() {
           </form>
         </div>
       ) : null}
+      <SaveProgressModal
+        open={Boolean(downloadingRowId)}
+        title={downloadPaused ? 'Durduruldu' : downloadPhase === 'analyze' ? 'Video hazırlanıyor' : 'İndiriliyor'}
+        percent={downloadPhase === 'analyze' ? 0 : downloadStats.percent}
+        loadedBytes={downloadStats.loaded}
+        totalBytes={downloadStats.total}
+        currentFile={downloadStats.current}
+        fileCount={downloadStats.fileCount}
+        lang="tr"
+        paused={downloadPaused}
+        onPause={pauseDownload}
+        onResume={resumeDownload}
+        onCancel={cancelDownload}
+      />
       <ConfirmToast
         open={Boolean(confirmDialog)}
         message={confirmDialog?.message}
