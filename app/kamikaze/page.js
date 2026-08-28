@@ -129,6 +129,39 @@ function countLiveStatus(rows, liveStatusByTweetId) {
   return { gone, checked };
 }
 
+function formatBytesLabel(bytes) {
+  if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes <= 0) return null;
+  const mb = bytes / (1024 * 1024);
+  if (mb >= 100) return `${Math.round(mb)} MB`;
+  if (mb >= 10) return `${mb.toFixed(1).replace('.', ',')} MB`;
+  return `${mb.toFixed(2).replace('.', ',')} MB`;
+}
+
+function rowVideoBytes(row, bytesByUrl) {
+  const urls = Array.isArray(row.video_urls) ? row.video_urls : [];
+  if (urls.length === 0) return { known: false, complete: false, bytes: 0 };
+  let bytes = 0;
+  let complete = true;
+  for (const url of urls) {
+    const size = bytesByUrl[url];
+    if (typeof size !== 'number') {
+      complete = false;
+      continue;
+    }
+    bytes += size;
+  }
+  return { known: true, complete, bytes };
+}
+
+function formatRowSizeLabel(row, bytesByUrl) {
+  const info = rowVideoBytes(row, bytesByUrl);
+  if (!info.known) return '—';
+  if (!info.complete && info.bytes === 0) return '…';
+  const label = formatBytesLabel(info.bytes);
+  if (!info.complete) return label ? `${label}…` : '…';
+  return label || '—';
+}
+
 const LIVE_STATUS_STYLES = {
   ok: 'bg-green-50 text-green-700',
   tweet_deleted: 'bg-amber-50 text-amber-800',
@@ -178,6 +211,8 @@ export default function KamikazePage() {
   const [downloadPaused, setDownloadPaused] = useState(false);
   const downloadControlRef = useRef({ status: 'idle', abort: null, wake: null });
   const analyzeAbortRef = useRef(null);
+  const probedVideoUrlsRef = useRef(new Set());
+  const [videoBytesByUrl, setVideoBytesByUrl] = useState({});
   const [editingUser, setEditingUser] = useState(null);
   const [savingUser, setSavingUser] = useState(false);
   const [visitorStats, setVisitorStats] = useState({
@@ -511,6 +546,86 @@ export default function KamikazePage() {
     if (hiddenLiveStatusFilter !== 'gone') return hiddenLogs;
     return filterGoneLogs(hiddenLogs, liveStatusByTweetId);
   }, [hiddenLogs, hiddenLiveStatusFilter, liveStatusByTweetId]);
+
+  useEffect(() => {
+    if (status !== 'dashboard') return;
+    if (activeTab !== 'stats' && activeTab !== 'hidden') return;
+    const rows = activeTab === 'hidden' ? filteredHiddenLogs : filteredRecentLogs;
+    const missing = [];
+    for (const row of rows) {
+      for (const url of row.video_urls || []) {
+        if (!url || probedVideoUrlsRef.current.has(url)) continue;
+        probedVideoUrlsRef.current.add(url);
+        missing.push(url);
+      }
+    }
+    if (missing.length === 0) return;
+
+    let cancelled = false;
+    const inflight = new Set(missing);
+
+    (async () => {
+      const chunkSize = 16;
+      for (let i = 0; i < missing.length; i += chunkSize) {
+        if (cancelled) return;
+        const urls = missing.slice(i, i + chunkSize);
+        try {
+          const res = await fetch('/api/kamikaze/video-sizes', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ urls }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (cancelled) return;
+          const bytesByUrl = data.bytesByUrl && typeof data.bytesByUrl === 'object' ? data.bytesByUrl : {};
+          setVideoBytesByUrl((prev) => {
+            const next = { ...prev };
+            for (const url of urls) {
+              const size = bytesByUrl[url];
+              next[url] = typeof size === 'number' && size > 0 ? size : 0;
+            }
+            return next;
+          });
+          for (const url of urls) inflight.delete(url);
+        } catch {
+          if (cancelled) return;
+          setVideoBytesByUrl((prev) => {
+            const next = { ...prev };
+            for (const url of urls) next[url] = 0;
+            return next;
+          });
+          for (const url of urls) inflight.delete(url);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      for (const url of inflight) probedVideoUrlsRef.current.delete(url);
+    };
+  }, [status, activeTab, filteredRecentLogs, filteredHiddenLogs]);
+
+  const pageVideoSize = useMemo(() => {
+    const rows = activeTab === 'hidden' ? filteredHiddenLogs : filteredRecentLogs;
+    let bytes = 0;
+    let probing = 0;
+    let knownRows = 0;
+    for (const row of rows) {
+      const info = rowVideoBytes(row, videoBytesByUrl);
+      if (!info.known) continue;
+      knownRows += 1;
+      bytes += info.bytes;
+      if (!info.complete) probing += 1;
+    }
+    let label = null;
+    if (rows.length > 0) {
+      if (knownRows === 0) label = 'Boyut: —';
+      else if (probing > 0 && bytes === 0) label = 'Boyut: …';
+      else label = `Bu sayfa: ${formatBytesLabel(bytes) || '0 MB'}${probing > 0 ? '…' : ''}`;
+    }
+    return { bytes, probing, knownRows, label };
+  }, [activeTab, filteredRecentLogs, filteredHiddenLogs, videoBytesByUrl]);
 
   const sortedUsers = useMemo(() => sortRows(users, usersSort, USER_SORT_GETTERS), [users, usersSort]);
   const sortedGuests = useMemo(() => sortRows(guests, guestsSort, GUEST_SORT_GETTERS), [guests, guestsSort]);
@@ -1319,7 +1434,12 @@ export default function KamikazePage() {
               <div className="px-4 sm:px-6 lg:px-8 py-3 sm:py-4 border-b border-gray-100 flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <h2 className="text-base lg:text-lg font-bold text-gray-900">Son analizler</h2>
-                  <p className="text-xs text-gray-500 mt-0.5">Her satır = bir X linki. Video = o linkten bulunan video adedi.</p>
+                  <p className="text-xs text-gray-500 mt-0.5">Her satır = bir X linki. Video = o linkten bulunan video adedi. Boyut, İndir’e basmadan görünür.</p>
+                  {pageVideoSize.label && (
+                    <p className="text-sm font-semibold tabular-nums text-gray-800 mt-1" title="Bu sayfadaki videoların tahmini indirme boyutu">
+                      {pageVideoSize.label}
+                    </p>
+                  )}
                 </div>
                 <div className="flex flex-wrap items-center gap-2 sm:gap-3">
                   {renderLogsPagination()}
@@ -1445,17 +1565,20 @@ export default function KamikazePage() {
                         className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3"
                         title="Bu linkten bulunan video adedi"
                       />
+                      <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium whitespace-nowrap" title="Kayıtlı videoların tahmini indirme boyutu">
+                        Boyut
+                      </th>
                       <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium w-12">Sil</th>
                     </tr>
                   </thead>
                   <tbody>
                     {stats.recentLogs.length === 0 ? (
                       <tr>
-                        <td colSpan={9} className="px-4 lg:px-8 py-12 text-center text-gray-500">Henüz kayıt yok.</td>
+                        <td colSpan={10} className="px-4 lg:px-8 py-12 text-center text-gray-500">Henüz kayıt yok.</td>
                       </tr>
                     ) : filteredRecentLogs.length === 0 ? (
                       <tr>
-                        <td colSpan={9} className="px-4 lg:px-8 py-12 text-center text-gray-500">
+                        <td colSpan={10} className="px-4 lg:px-8 py-12 text-center text-gray-500">
                           {liveStatusFilter === 'gone'
                             ? 'Bu sayfada silinmiş veya askıdaki gönderi yok. Önce taramayı çalıştırın.'
                             : logsUsernameFilterMode === 'exclude'
@@ -1550,6 +1673,16 @@ export default function KamikazePage() {
                             </button>
                           </td>
                           <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 align-middle">{row.video_count ?? 0}</td>
+                          <td
+                            className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 whitespace-nowrap tabular-nums align-middle"
+                            title={
+                              Array.isArray(row.video_urls) && row.video_urls.length > 0
+                                ? 'Kayıtlı videoların tahmini indirme boyutu'
+                                : 'Bu kayıtta video URL’si yok; boyut ölçülemez'
+                            }
+                          >
+                            {formatRowSizeLabel(row, videoBytesByUrl)}
+                          </td>
                           <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 align-middle">
                             <button
                               type="button"
@@ -2119,6 +2252,11 @@ export default function KamikazePage() {
               <div>
                 <h2 className="text-base lg:text-lg font-bold text-gray-900">Soft silinenler</h2>
                 <p className="text-xs text-gray-500 mt-0.5">Kamikaze listesinden gizlenen kayıtlar. Kullanıcı arşivinde durur.</p>
+                {pageVideoSize.label && (
+                  <p className="text-sm font-semibold tabular-nums text-gray-800 mt-1" title="Bu sayfadaki videoların tahmini indirme boyutu">
+                    {pageVideoSize.label}
+                  </p>
+                )}
               </div>
               <div className="flex flex-wrap items-center gap-2 sm:gap-3">
                 {renderHiddenPagination()}
@@ -2259,17 +2397,20 @@ export default function KamikazePage() {
                         className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3"
                         title="Bu linkten bulunan video adedi"
                       />
+                      <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium whitespace-nowrap" title="Kayıtlı videoların tahmini indirme boyutu">
+                        Boyut
+                      </th>
                       <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium w-24">İşlem</th>
                     </tr>
                   </thead>
                   <tbody>
                     {hiddenLogs.length === 0 ? (
                       <tr>
-                        <td colSpan={8} className="px-4 lg:px-8 py-12 text-center text-gray-500">Soft silinen kayıt yok.</td>
+                        <td colSpan={9} className="px-4 lg:px-8 py-12 text-center text-gray-500">Soft silinen kayıt yok.</td>
                       </tr>
                     ) : filteredHiddenLogs.length === 0 ? (
                       <tr>
-                        <td colSpan={8} className="px-4 lg:px-8 py-12 text-center text-gray-500">
+                        <td colSpan={9} className="px-4 lg:px-8 py-12 text-center text-gray-500">
                           {hiddenLiveStatusFilter === 'gone'
                             ? 'Bu sayfada silinmiş veya askıdaki gönderi yok. Önce taramayı çalıştırın.'
                             : hiddenUsernameFilterMode === 'exclude'
@@ -2344,6 +2485,16 @@ export default function KamikazePage() {
                             )}
                           </td>
                           <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 align-middle">{row.video_count ?? 0}</td>
+                          <td
+                            className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 whitespace-nowrap tabular-nums align-middle"
+                            title={
+                              Array.isArray(row.video_urls) && row.video_urls.length > 0
+                                ? 'Kayıtlı videoların tahmini indirme boyutu'
+                                : 'Bu kayıtta video URL’si yok; boyut ölçülemez'
+                            }
+                          >
+                            {formatRowSizeLabel(row, videoBytesByUrl)}
+                          </td>
                           <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 align-middle">
                             <div className="flex items-center gap-1">
                               <button

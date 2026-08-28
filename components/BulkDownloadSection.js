@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import dynamic from 'next/dynamic';
 import MetadataIcons from './MetadataIcons.js';
 import { buildDownloadFileName, buildZipFileName } from '@/lib/download-filename.js';
@@ -20,6 +20,8 @@ import {
   pruneResultsForLinks,
 } from '@/lib/tweet-thumbnails.js';
 import { collapseDistinctVideos } from '@/lib/tweet-media.js';
+import { fetchVideoBytesByUrl } from '@/lib/fetch-video-bytes.js';
+import { formatBytesLabel, formatTotalSizeLabel } from '@/lib/format-bytes.js';
 import { createDownloadProgressTracker, createDownloadAbortedError, waitWhilePaused, delayWithControl, runCancellableFile } from '@/lib/download-progress.js';
 import SaveProgressModal from './SaveProgressModal.js';
 
@@ -200,12 +202,14 @@ export default function BulkDownloadSection({
   const [activeDownload, setActiveDownload] = useState(null); // null | { type: 'quality', mode } | { type: 'zip' }
   const [downloadStats, setDownloadStats] = useState({ loaded: 0, total: 0, percent: 0, current: 0, fileCount: 0 });
   const [downloadPaused, setDownloadPaused] = useState(false);
+  const [videoBytesByUrl, setVideoBytesByUrl] = useState({});
   const requestInProgress = useRef(false);
   const downloadControlRef = useRef({ status: 'idle', abort: null, wake: null });
   const lastSavedKeyRef = useRef('');
   const prevLinksKeyRef = useRef('');
   const downloadedPostKeysRef = useRef(new Set());
   const bulkThumbnailsRef = useRef({});
+  const probedVideoUrlsRef = useRef(new Set());
   bulkThumbnailsRef.current = bulkThumbnails;
 
   const pasteLinksModalTextDefault = lang === 'tr' ? 'Lütfen önce Twitter/X gönderi linklerini yapıştırın.' : lang === 'de' ? 'Bitte fügen Sie zuerst Twitter/X-Beitragslinks ein.' : lang === 'es' ? 'Por favor, pegue primero los enlaces de publicaciones de Twitter/X.' : 'Please paste Twitter/X post links first.';
@@ -531,6 +535,45 @@ export default function BulkDownloadSection({
     }, 800);
     return () => clearTimeout(id);
   }, [links.join('|'), isLoggedIn]);
+
+  useEffect(() => {
+    const urls = [];
+    for (const result of results) {
+      if (result?.status !== 'success') continue;
+      for (const video of collapseDistinctVideos(
+        (result.videos || []).filter(
+          (item) => item?.url && typeof item.url === 'string' && item.url.startsWith('http') && item.mediaType !== 'photo'
+        )
+      )) {
+        urls.push(video.url);
+      }
+    }
+    const missing = [...new Set(urls)].filter((url) => !probedVideoUrlsRef.current.has(url));
+    if (missing.length === 0) return;
+
+    let cancelled = false;
+    const inflight = new Set(missing);
+    missing.forEach((url) => probedVideoUrlsRef.current.add(url));
+
+    (async () => {
+      const bytesByUrl = await fetchVideoBytesByUrl(missing);
+      if (cancelled) return;
+      setVideoBytesByUrl((prev) => {
+        const next = { ...prev };
+        for (const url of missing) {
+          const size = bytesByUrl[url];
+          next[url] = typeof size === 'number' && size > 0 ? size : 0;
+        }
+        return next;
+      });
+      for (const url of missing) inflight.delete(url);
+    })();
+
+    return () => {
+      cancelled = true;
+      for (const url of inflight) probedVideoUrlsRef.current.delete(url);
+    };
+  }, [results]);
 
   const handleDownloadByQualityRef = useRef(null);
   const handleDownloadAsZipRef = useRef(null);
@@ -905,6 +948,34 @@ export default function BulkDownloadSection({
   const count = links.length;
   const downloadLabel = downloadTemplate.replace('{n}', String(count));
   const successResults = results.filter((r) => r.status === 'success' && r.videos?.length > 0);
+  const analysisSize = useMemo(() => {
+    const urls = [];
+    for (const result of successResults) {
+      for (const video of collapseDistinctVideos(
+        (result.videos || []).filter(
+          (item) => item?.url && typeof item.url === 'string' && item.url.startsWith('http') && item.mediaType !== 'photo'
+        )
+      )) {
+        if (video.url) urls.push(video.url);
+      }
+    }
+    const unique = [...new Set(urls)];
+    let bytes = 0;
+    let probing = 0;
+    for (const url of unique) {
+      const size = videoBytesByUrl[url];
+      if (typeof size !== 'number') {
+        probing += 1;
+        continue;
+      }
+      bytes += size;
+    }
+    return {
+      bytes,
+      probing,
+      label: unique.length === 0 ? null : formatTotalSizeLabel(bytes, { probing: probing > 0, locale: lang }),
+    };
+  }, [successResults, videoBytesByUrl, lang]);
 
   const linkToResult = buildResultsByStatusId(results);
 
@@ -1086,6 +1157,13 @@ export default function BulkDownloadSection({
                             views={r?.metadata?.views}
                             created_at={r?.metadata?.created_at}
                             created_timestamp={r?.metadata?.created_timestamp}
+                            sizeLabel={
+                              video?.url
+                                ? typeof videoBytesByUrl[video.url] === 'number'
+                                  ? formatBytesLabel(videoBytesByUrl[video.url], lang) || '—'
+                                  : '…'
+                                : null
+                            }
                           />
                           {showRemove && (
                           <button
@@ -1179,6 +1257,11 @@ export default function BulkDownloadSection({
       )}
 
       <div className={`rounded-xl border px-3 sm:px-4 py-3 sm:py-4 ${resultClass}`}>
+        {analysisSize.label && (
+          <p className="text-sm font-semibold tabular-nums text-gray-800 mb-2" title={lang === 'tr' ? 'Kaydedilecek videoların tahmini boyutu' : 'Estimated size of videos to save'}>
+            {analysisSize.label}
+          </p>
+        )}
         <div className="flex flex-col sm:flex-row flex-wrap gap-2">
           {availableQualities.map((mode) => {
             const isBest = mode === 'best';

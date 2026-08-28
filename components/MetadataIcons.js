@@ -28,9 +28,10 @@ function formatDateShort(created_at, created_timestamp) {
   return null;
 }
 
-export default function MetadataIcons({ durationSec, likes, retweets, views, created_at, created_timestamp, className = '' }) {
+export default function MetadataIcons({ durationSec, likes, retweets, views, created_at, created_timestamp, sizeLabel, className = '' }) {
   const items = [];
   if (durationSec != null && durationSec > 0) items.push({ icon: '⏱️', value: formatDuration(durationSec) });
+  if (sizeLabel) items.push({ icon: '💾', value: sizeLabel });
   if (likes != null && likes >= 0) items.push({ icon: '❤️', value: formatCompact(likes) });
   if (retweets != null && retweets >= 0) items.push({ icon: '🔄', value: formatCompact(retweets) });
   if (views != null && views >= 0) items.push({ icon: '👁️', value: formatCompact(views) });

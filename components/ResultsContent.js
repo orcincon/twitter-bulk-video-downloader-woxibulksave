@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import Link from 'next/link';
 import SignInToast from './SignInToast.js';
 import { buildDownloadFileName, buildZipFileName } from '@/lib/download-filename.js';
@@ -12,6 +12,8 @@ import {
 } from '@/lib/guest-limit.js';
 
 import { collapseDistinctVideos } from '@/lib/tweet-media.js';
+import { fetchVideoBytesByUrl } from '@/lib/fetch-video-bytes.js';
+import { formatBytesLabel, formatTotalSizeLabel } from '@/lib/format-bytes.js';
 
 const STATUS_ID_REGEX = /\/status\/(\d+)/i;
 function getStatusId(u) {
@@ -39,6 +41,8 @@ export default function ResultsContent({
   const [signInToast, setSignInToast] = useState(null);
   const loadedLogIdRef = useRef(null);
   const lastSavedKeyRef = useRef('');
+  const probedVideoUrlsRef = useRef(new Set());
+  const [videoBytesByUrl, setVideoBytesByUrl] = useState({});
 
   useEffect(() => {
     if (isLoggedIn) clearGuestDownloadCount();
@@ -190,6 +194,68 @@ export default function ResultsContent({
     )
   );
 
+  useEffect(() => {
+    const urls = [];
+    for (const result of results) {
+      if (result?.status !== 'success') continue;
+      for (const video of result.videos || []) {
+        if (
+          video?.url &&
+          typeof video.url === 'string' &&
+          video.url.startsWith('http') &&
+          video.mediaType !== 'photo' &&
+          (video.label || video.quality || '') !== 'Standard'
+        ) {
+          urls.push(video.url);
+        }
+      }
+    }
+    const missing = [...new Set(urls)].filter((url) => !probedVideoUrlsRef.current.has(url));
+    if (missing.length === 0) return;
+
+    let cancelled = false;
+    const inflight = new Set(missing);
+    missing.forEach((url) => probedVideoUrlsRef.current.add(url));
+
+    (async () => {
+      const bytesByUrl = await fetchVideoBytesByUrl(missing);
+      if (cancelled) return;
+      setVideoBytesByUrl((prev) => {
+        const next = { ...prev };
+        for (const url of missing) {
+          const size = bytesByUrl[url];
+          next[url] = typeof size === 'number' && size > 0 ? size : 0;
+        }
+        return next;
+      });
+      for (const url of missing) inflight.delete(url);
+    })();
+
+    return () => {
+      cancelled = true;
+      for (const url of inflight) probedVideoUrlsRef.current.delete(url);
+    };
+  }, [results]);
+
+  const analysisSize = useMemo(() => {
+    const unique = [...new Set(allVideos.map((video) => video.url).filter(Boolean))];
+    let bytes = 0;
+    let probing = 0;
+    for (const url of unique) {
+      const size = videoBytesByUrl[url];
+      if (typeof size !== 'number') {
+        probing += 1;
+        continue;
+      }
+      bytes += size;
+    }
+    return {
+      label: unique.length === 0 ? null : formatTotalSizeLabel(bytes, { probing: probing > 0, locale: lang }),
+    };
+  }, [allVideos, videoBytesByUrl, lang]);
+
+  const sizeColumnLabel = t.size || (lang === 'tr' ? 'Boyut' : lang === 'de' ? 'Größe' : lang === 'es' ? 'Tamaño' : 'Size');
+
   const handleDownloadAll = useCallback(async () => {
     if (allVideos.length === 0) return;
     if (!isLoggedIn) {
@@ -300,6 +366,11 @@ export default function ResultsContent({
         <>
             <div className="rounded-xl border border-[#1d9bf0]/30 bg-white px-3 sm:px-4 py-3 sm:py-4 mb-4 sm:mb-6 space-y-3 shadow-sm">
               <p className="text-sm font-medium text-gray-700">{t.downloadOptions || 'Download Options'}</p>
+              {analysisSize.label && (
+                <p className="text-sm font-semibold tabular-nums text-gray-800" title={t.totalSize || 'Total size'}>
+                  {analysisSize.label}
+                </p>
+              )}
             <div className="flex flex-col sm:flex-row gap-3">
               <label className="flex items-center gap-2 cursor-pointer">
                 <input
@@ -355,6 +426,13 @@ export default function ResultsContent({
                       <img key={`${rowStatusId}-${thumbUrl}`} src={thumbUrl} alt="WBS - X/Twitter video önizleme" width={320} height={180} className="w-full aspect-video object-cover rounded-lg bg-gray-100" referrerPolicy="no-referrer" />
                     ) : null}
                     <p className="text-xs text-gray-600">{qualityLabel}: {label}</p>
+                    {hasUrl && (
+                      <p className="text-xs font-semibold tabular-nums text-gray-800">
+                        {typeof videoBytesByUrl[v.url] === 'number'
+                          ? formatBytesLabel(videoBytesByUrl[v.url], lang) || '—'
+                          : '…'}
+                      </p>
+                    )}
                     {hasUrl ? (
                       <a
                         href={v.url}
@@ -388,6 +466,7 @@ export default function ResultsContent({
                 <tr className="border-b border-gray-200">
                   <th className="text-left py-3 px-2 text-gray-600 font-medium">{thumbnailLabel}</th>
                   <th className="text-left py-3 px-2 text-gray-600 font-medium">{qualityLabel}</th>
+                  <th className="text-left py-3 px-2 text-gray-600 font-medium">{sizeColumnLabel}</th>
                   <th className="text-left py-3 px-2 text-gray-400 font-medium"></th>
                 </tr>
               </thead>
@@ -412,6 +491,13 @@ export default function ResultsContent({
                           </div>
                         </td>
                         <td className="py-3 px-2 text-gray-700">{label}</td>
+                        <td className="py-3 px-2 text-gray-700 whitespace-nowrap tabular-nums">
+                          {hasUrl
+                            ? typeof videoBytesByUrl[v.url] === 'number'
+                              ? formatBytesLabel(videoBytesByUrl[v.url], lang) || '—'
+                              : '…'
+                            : '—'}
+                        </td>
                         <td className="py-3 px-2">
                           {hasUrl ? (
                             <a

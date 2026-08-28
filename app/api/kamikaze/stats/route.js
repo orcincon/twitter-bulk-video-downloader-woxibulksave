@@ -10,7 +10,7 @@ import {
   isAnonymousTweetPath,
   resolveTweetDisplayUrl,
 } from '@/lib/tweet-url.js';
-import { countDistinctVideos } from '@/lib/tweet-media.js';
+import { countDistinctVideos, getPlayableVideoUrls } from '@/lib/tweet-media.js';
 
 function makeToken(email, secret) {
   return createHash('sha256').update(`${email || ''}:${secret}`).digest('hex');
@@ -98,6 +98,7 @@ function expandRecentLogs(rawLogs, resolveUserLabel) {
         url: resolveTweetDisplayUrl(url, { tweetUrl: result?.tweetUrl, metadata: result?.metadata }),
         thumbnail: thumb,
         video_count: videoCount,
+        video_urls: Array.isArray(result?.videos) ? getPlayableVideoUrls(result.videos) : [],
       });
     });
   }
