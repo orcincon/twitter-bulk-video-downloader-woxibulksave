@@ -9,6 +9,7 @@ import { extractTweetId } from '@/lib/tweet-url.js';
 import { buildDownloadFileName } from '@/lib/download-filename.js';
 import { downloadMediaInBrowser, probeMediaBytes, isDownloadAborted } from '@/lib/client-download.js';
 import { collapseDistinctVideos } from '@/lib/tweet-media.js';
+import { formatBytesLabel } from '@/lib/format-bytes.js';
 import {
   createDownloadProgressTracker,
   createDownloadAbortedError,
@@ -40,7 +41,7 @@ function sortRows(rows, sort, getters) {
 }
 
 function nextSortState(prev, field) {
-  if (prev.field !== field) return { field, dir: 'asc' };
+  if (prev.field !== field) return { field, dir: field === 'size' ? 'desc' : 'asc' };
   return { field, dir: prev.dir === 'asc' ? 'desc' : 'asc' };
 }
 
@@ -129,14 +130,6 @@ function countLiveStatus(rows, liveStatusByTweetId) {
   return { gone, checked };
 }
 
-function formatBytesLabel(bytes) {
-  if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes <= 0) return null;
-  const mb = bytes / (1024 * 1024);
-  if (mb >= 100) return `${Math.round(mb)} MB`;
-  if (mb >= 10) return `${mb.toFixed(1).replace('.', ',')} MB`;
-  return `${mb.toFixed(2).replace('.', ',')} MB`;
-}
-
 function rowVideoBytes(row, bytesByUrl) {
   const urls = Array.isArray(row.video_urls) ? row.video_urls : [];
   if (urls.length === 0) return { known: false, complete: false, bytes: 0 };
@@ -153,11 +146,30 @@ function rowVideoBytes(row, bytesByUrl) {
   return { known: true, complete, bytes };
 }
 
+function rowSizeSortValue(row, bytesByUrl) {
+  const info = rowVideoBytes(row, bytesByUrl);
+  if (!info.known) return null;
+  if (!info.complete && info.bytes === 0) return null;
+  return info.bytes;
+}
+
+function sortLogsBySize(rows, dir, bytesByUrl) {
+  const mul = dir === 'asc' ? 1 : -1;
+  return [...rows].sort((a, b) => {
+    const av = rowSizeSortValue(a, bytesByUrl);
+    const bv = rowSizeSortValue(b, bytesByUrl);
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1;
+    if (bv == null) return -1;
+    return (av - bv) * mul;
+  });
+}
+
 function formatRowSizeLabel(row, bytesByUrl) {
   const info = rowVideoBytes(row, bytesByUrl);
   if (!info.known) return '—';
   if (!info.complete && info.bytes === 0) return '…';
-  const label = formatBytesLabel(info.bytes);
+  const label = formatBytesLabel(info.bytes, 'tr');
   if (!info.complete) return label ? `${label}…` : '…';
   return label || '—';
 }
@@ -184,6 +196,7 @@ export default function KamikazePage() {
   const [logsUsernameFilter, setLogsUsernameFilter] = useState('');
   const [logsUsernameFilterMode, setLogsUsernameFilterMode] = useState('include');
   const [logsSort, setLogsSort] = useState({ field: 'created_at', dir: 'desc' });
+  const lastLogsServerSortRef = useRef({ field: 'created_at', dir: 'desc' });
   const [usersSort, setUsersSort] = useState({ field: 'created_at', dir: 'desc' });
   const [guestsSort, setGuestsSort] = useState({ field: 'last_seen', dir: 'desc' });
   const [pagesSort, setPagesSort] = useState({ field: 'visits', dir: 'desc' });
@@ -234,6 +247,7 @@ export default function KamikazePage() {
   const [hiddenPage, setHiddenPage] = useState(1);
   const [hiddenPagination, setHiddenPagination] = useState({ page: 1, pageSize: 100, totalPages: 1, totalRecentRows: 0 });
   const [hiddenSort, setHiddenSort] = useState({ field: 'created_at', dir: 'desc' });
+  const lastHiddenServerSortRef = useRef({ field: 'created_at', dir: 'desc' });
   const [hiddenUsernameFilter, setHiddenUsernameFilter] = useState('');
   const [hiddenUsernameFilterMode, setHiddenUsernameFilterMode] = useState('include');
   const [hiddenUsernameOptions, setHiddenUsernameOptions] = useState([]);
@@ -271,8 +285,9 @@ export default function KamikazePage() {
         params.set('username', filterNorm);
         params.set('usernameMode', logsUsernameFilterMode);
       }
-      params.set('sortBy', logsSort.field);
-      params.set('sortDir', logsSort.dir);
+      const serverSort = logsSort.field === 'size' ? lastLogsServerSortRef.current : logsSort;
+      params.set('sortBy', serverSort.field);
+      params.set('sortDir', serverSort.dir);
 
       const res = await fetch(`/api/kamikaze/stats?${params.toString()}`, { credentials: 'include' });
       if (res.status === 401) {
@@ -312,9 +327,14 @@ export default function KamikazePage() {
     }
   };
 
+  const logsServerSortKey =
+    logsSort.field === 'size'
+      ? `${lastLogsServerSortRef.current.field}:${lastLogsServerSortRef.current.dir}`
+      : `${logsSort.field}:${logsSort.dir}`;
+
   useEffect(() => {
     if (activeTab === 'stats') loadStats(logsPage);
-  }, [activeTab, logsPage, logsUsernameFilter, logsUsernameFilterMode, logsSort]);
+  }, [activeTab, logsPage, logsUsernameFilter, logsUsernameFilterMode, logsServerSortKey]);
 
   const loadHiddenLogs = async (page = hiddenPage) => {
     setLoadingHidden(true);
@@ -329,8 +349,9 @@ export default function KamikazePage() {
         params.set('username', filterNorm);
         params.set('usernameMode', hiddenUsernameFilterMode);
       }
-      params.set('sortBy', hiddenSort.field);
-      params.set('sortDir', hiddenSort.dir);
+      const serverSort = hiddenSort.field === 'size' ? lastHiddenServerSortRef.current : hiddenSort;
+      params.set('sortBy', serverSort.field);
+      params.set('sortDir', serverSort.dir);
 
       const res = await fetch(`/api/kamikaze/stats?${params.toString()}`, { credentials: 'include' });
       if (res.status === 401) {
@@ -359,9 +380,14 @@ export default function KamikazePage() {
     }
   };
 
+  const hiddenServerSortKey =
+    hiddenSort.field === 'size'
+      ? `${lastHiddenServerSortRef.current.field}:${lastHiddenServerSortRef.current.dir}`
+      : `${hiddenSort.field}:${hiddenSort.dir}`;
+
   useEffect(() => {
     if (activeTab === 'hidden') loadHiddenLogs(hiddenPage);
-  }, [activeTab, hiddenPage, hiddenUsernameFilter, hiddenUsernameFilterMode, hiddenSort]);
+  }, [activeTab, hiddenPage, hiddenUsernameFilter, hiddenUsernameFilterMode, hiddenServerSortKey]);
 
   useEffect(() => {
     if (!previewImage && !editingUser) return undefined;
@@ -547,6 +573,16 @@ export default function KamikazePage() {
     return filterGoneLogs(hiddenLogs, liveStatusByTweetId);
   }, [hiddenLogs, hiddenLiveStatusFilter, liveStatusByTweetId]);
 
+  const displayedRecentLogs = useMemo(() => {
+    if (logsSort.field !== 'size') return filteredRecentLogs;
+    return sortLogsBySize(filteredRecentLogs, logsSort.dir, videoBytesByUrl);
+  }, [filteredRecentLogs, logsSort, videoBytesByUrl]);
+
+  const displayedHiddenLogs = useMemo(() => {
+    if (hiddenSort.field !== 'size') return filteredHiddenLogs;
+    return sortLogsBySize(filteredHiddenLogs, hiddenSort.dir, videoBytesByUrl);
+  }, [filteredHiddenLogs, hiddenSort, videoBytesByUrl]);
+
   useEffect(() => {
     if (status !== 'dashboard') return;
     if (activeTab !== 'stats' && activeTab !== 'hidden') return;
@@ -622,7 +658,7 @@ export default function KamikazePage() {
     if (rows.length > 0) {
       if (knownRows === 0) label = 'Boyut: —';
       else if (probing > 0 && bytes === 0) label = 'Boyut: …';
-      else label = `Bu sayfa: ${formatBytesLabel(bytes) || '0 MB'}${probing > 0 ? '…' : ''}`;
+      else label = `Bu sayfa: ${formatBytesLabel(bytes, 'tr') || '0 MB'}${probing > 0 ? '…' : ''}`;
     }
     return { bytes, probing, knownRows, label };
   }, [activeTab, filteredRecentLogs, filteredHiddenLogs, videoBytesByUrl]);
@@ -643,8 +679,12 @@ export default function KamikazePage() {
   );
 
   const handleLogsSort = (field) => {
-    setLogsSort((prev) => nextSortState(prev, field));
-    setLogsPage(1);
+    setLogsSort((prev) => {
+      const next = nextSortState(prev, field);
+      if (next.field !== 'size') lastLogsServerSortRef.current = next;
+      return next;
+    });
+    if (field !== 'size') setLogsPage(1);
   };
 
   const allFilteredLogsSelected =
@@ -956,8 +996,12 @@ export default function KamikazePage() {
   };
 
   const handleHiddenSort = (field) => {
-    setHiddenSort((prev) => nextSortState(prev, field));
-    setHiddenPage(1);
+    setHiddenSort((prev) => {
+      const next = nextSortState(prev, field);
+      if (next.field !== 'size') lastHiddenServerSortRef.current = next;
+      return next;
+    });
+    if (field !== 'size') setHiddenPage(1);
   };
 
   const toggleSetItem = (setter, key) => {
@@ -1439,7 +1483,7 @@ export default function KamikazePage() {
                   <span className="hidden sm:inline">OAuth token&apos;lı kullanıcı</span>
                 </p>
                 <p className="text-lg sm:text-3xl lg:text-4xl font-bold text-gray-900 tabular-nums">{stats.usersWithOAuthToken}</p>
-                <p className="hidden sm:block text-xs text-gray-500 mt-1">X girişinde kaydedilen havuz token&apos;ı</p>
+                  <p className="hidden sm:block text-xs text-gray-500 mt-1">Geçerli veya yenilenebilir X token</p>
               </div>
             </div>
 
@@ -1547,9 +1591,14 @@ export default function KamikazePage() {
                         />
                       </th>
                       <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium">Önizleme</th>
-                      <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium whitespace-nowrap" title="Kayıtlı videoların tahmini indirme boyutu">
-                        Boyut
-                      </th>
+                      <SortableTh
+                        label="Boyut"
+                        field="size"
+                        sort={logsSort}
+                        onSort={handleLogsSort}
+                        className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 whitespace-nowrap"
+                        title="Bu sayfadaki satırları tahmini indirme boyutuna göre sırala"
+                      />
                       <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium w-14">İndir</th>
                       <SortableTh
                         label="X"
@@ -1600,7 +1649,7 @@ export default function KamikazePage() {
                         </td>
                       </tr>
                     ) : (
-                      filteredRecentLogs.map((row) => (
+                      displayedRecentLogs.map((row) => (
                         <tr key={row.id} className="border-t border-gray-100 hover:bg-gray-50/50">
                           <td className="px-2 sm:px-3 py-2 sm:py-3 align-middle">
                             <input
@@ -2435,9 +2484,14 @@ export default function KamikazePage() {
                         className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3"
                         title="Bu linkten bulunan video adedi"
                       />
-                      <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium whitespace-nowrap" title="Kayıtlı videoların tahmini indirme boyutu">
-                        Boyut
-                      </th>
+                      <SortableTh
+                        label="Boyut"
+                        field="size"
+                        sort={hiddenSort}
+                        onSort={handleHiddenSort}
+                        className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 whitespace-nowrap"
+                        title="Bu sayfadaki satırları tahmini indirme boyutuna göre sırala"
+                      />
                       <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium w-24">İşlem</th>
                     </tr>
                   </thead>
@@ -2457,7 +2511,7 @@ export default function KamikazePage() {
                         </td>
                       </tr>
                     ) : (
-                      filteredHiddenLogs.map((row) => (
+                      displayedHiddenLogs.map((row) => (
                         <tr key={row.id} className="border-t border-gray-100 hover:bg-gray-50/50">
                           <td className="px-2 sm:px-3 py-2 sm:py-3 align-middle">
                             <input

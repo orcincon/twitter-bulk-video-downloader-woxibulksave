@@ -199,6 +199,17 @@ const LOG_SORT_GETTERS = {
   video_count: (row) => row.video_count ?? 0,
 };
 
+function countPoolEligibleUsers(rows) {
+  let n = 0;
+  for (const user of rows ?? []) {
+    const status = String(user.x_account_status || '');
+    if (status === 'deleted' || status === 'suspended') continue;
+    if (user.refresh_token) n += 1;
+    else if (user.access_token && user.token_is_valid !== false) n += 1;
+  }
+  return n;
+}
+
 function sortRecentLogs(logs, sortBy, sortDir) {
   const getter = LOG_SORT_GETTERS[sortBy] || LOG_SORT_GETTERS.created_at;
   const dir = sortDir === 'asc' ? 'asc' : 'desc';
@@ -239,12 +250,10 @@ export async function GET(request) {
     const [usersRes, tokenUsersRes, allUsersRes, logsFetch] = await Promise.all([
       supabase.from('users').select('id', { count: 'exact', head: true }),
       hiddenOnly
-        ? Promise.resolve({ count: 0 })
+        ? Promise.resolve({ data: [] })
         : supabase
             .from('users')
-            .select('id', { count: 'exact', head: true })
-            .not('access_token', 'is', null)
-            .or('token_is_valid.is.null,token_is_valid.eq.true'),
+            .select('id, access_token, refresh_token, token_is_valid, x_account_status'),
       supabase.from('users').select('id, name, email, username'),
       fetchAllAnalysisLogs(supabase, { hiddenOnly }),
     ]);
@@ -267,7 +276,14 @@ export async function GET(request) {
     }
 
     const totalUsers = usersRes?.count ?? 0;
-    const usersWithOAuthToken = tokenUsersRes?.count ?? 0;
+    let tokenRows = tokenUsersRes;
+    if (tokenUsersRes?.error) {
+      tokenRows = await supabase
+        .from('users')
+        .select('id, access_token, token_is_valid')
+        .not('access_token', 'is', null);
+    }
+    const usersWithOAuthToken = countPoolEligibleUsers(tokenRows?.data ?? tokenUsersRes?.data);
 
     const userById = new Map();
     const userByEmail = new Map();

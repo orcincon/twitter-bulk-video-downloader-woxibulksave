@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getSessionSafe } from '@/lib/auth.js';
-import { createSupabaseClient, ensureUserInSupabase } from '@/lib/supabase.js';
-import { decryptToken } from '@/lib/token-crypto.js';
+import { ensureUserInSupabase } from '@/lib/supabase.js';
+import { getTokenPool, markTokenInvalid, refreshPoolBearer } from '@/lib/oauth-token-pool.js';
 import { canonicalizeResultTweetUrl, fetchFixTweetRaw, parseFixTweetMetadata } from '@/lib/fixtweet.js';
 import { collapseDistinctVideos } from '@/lib/tweet-media.js';
 import { extractTweetId as extractTweetIdFromUrl } from '@/lib/tweet-url.js';
@@ -128,56 +128,6 @@ function finalizeVideoList(videoList, max = 10) {
     if (out.length >= max) break;
   }
   return out;
-}
-
-/** Credential: { type: 'bearer'|'cookie', token, userId? } */
-const TOKEN_POOL_CACHE_MS = 5 * 60 * 1000;
-let tokenPoolCache = { items: [], ts: 0 };
-
-async function getTokenPool() {
-  const now = Date.now();
-  if (tokenPoolCache.items.length > 0 && now - tokenPoolCache.ts < TOKEN_POOL_CACHE_MS) {
-    return tokenPoolCache.items;
-  }
-  const items = [];
-  const supabase = createSupabaseClient();
-  if (supabase) {
-    let usersRes = await supabase
-      .from('users')
-      .select('id, access_token, token_is_valid, x_account_status')
-      .not('access_token', 'is', null)
-      .or('token_is_valid.is.null,token_is_valid.eq.true');
-    if (usersRes.error) {
-      usersRes = await supabase
-        .from('users')
-        .select('id, access_token, token_is_valid')
-        .not('access_token', 'is', null)
-        .or('token_is_valid.is.null,token_is_valid.eq.true');
-    }
-    if (usersRes.data?.length) {
-      usersRes.data.forEach((u) => {
-        const status = String(u.x_account_status || '');
-        if (status === 'deleted' || status === 'suspended') return;
-        if (u.token_is_valid === false) return;
-        const t = decryptToken(u.access_token)?.trim();
-        if (t) items.push({ type: 'bearer', token: t, userId: u.id });
-      });
-    }
-    const { data: authRows } = await supabase.from('auth_tokens').select('id, token').eq('is_active', true);
-    if (authRows?.length) {
-      authRows.forEach((r) => {
-        const t = r.token?.trim();
-        if (t) items.push({ type: 'cookie', token: t, authTokenId: r.id });
-      });
-    }
-  }
-  const raw = process.env.TWITTER_AUTH_TOKENS || '';
-  raw.split(',').forEach((t) => {
-    const s = t.trim();
-    if (s) items.push({ type: 'cookie', token: s });
-  });
-  tokenPoolCache = { items, ts: now };
-  return items;
 }
 
 function parseSyndicationVideos(data) {
@@ -328,20 +278,6 @@ async function fetchViaSyndication(tweetId, authToken, accessToken) {
   return parseSyndicationVideos(data);
 }
 
-async function markTokenInvalid(cred) {
-  const supabase = createSupabaseClient();
-  if (!supabase) return;
-  if (cred?.userId) {
-    await supabase.from('users').update({ token_is_valid: false, updated_at: new Date().toISOString() }).eq('id', cred.userId);
-  }
-  if (cred?.authTokenId) {
-    await supabase.from('auth_tokens').update({ is_active: false }).eq('id', cred.authTokenId);
-  }
-  if (cred?.userId || cred?.authTokenId) {
-    tokenPoolCache = { items: [], ts: 0 };
-  }
-}
-
 async function fetchVideoForUrl(tweetUrl, sessionAccessToken) {
   const tweetId = extractTweetId(tweetUrl);
   if (!tweetId) {
@@ -369,6 +305,20 @@ async function fetchVideoForUrl(tweetUrl, sessionAccessToken) {
       }
       if (result === null) continue;
       if (result?.httpStatus === 401 || result?.httpStatus === 403) {
+        const refreshed = await refreshPoolBearer(cred);
+        if (refreshed?.token) {
+          const retry = await fetchViaSyndication(tweetId, null, refreshed.token);
+          if (retry && retry.videos?.length > 0) {
+            tokenPoolIndex += i + 1;
+            const fixRaw = await fetchFixTweetRaw(tweetUrl);
+            const meta = fixRaw ? parseFixTweetMetadata(fixRaw) : null;
+            const fixThumb = fixRaw ? parseFixTweetVideos(fixRaw).thumbnail : null;
+            const thumbnail = retry.thumbnail || fixThumb || null;
+            const canonicalUrl = canonicalizeResultTweetUrl(tweetUrl, meta);
+            return { tweetUrl: canonicalUrl, status: 'success', videos: retry.videos, thumbnail, metadata: meta || null, error: null };
+          }
+          if (retry === null || (retry?.httpStatus !== 401 && retry?.httpStatus !== 403)) continue;
+        }
         await markTokenInvalid(cred);
         continue;
       }

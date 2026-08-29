@@ -1,10 +1,11 @@
 'use client';
 
+import { formatBytesLabel } from '@/lib/format-bytes.js';
+
 function formatMb(bytes, lang = 'en') {
-  const mb = Math.max(0, Number(bytes) || 0) / (1024 * 1024);
-  const digits = mb < 1 ? 2 : 1;
-  const locale = lang === 'tr' ? 'tr-TR' : lang === 'de' ? 'de-DE' : lang === 'es' ? 'es-ES' : 'en-US';
-  return `${mb.toLocaleString(locale, { minimumFractionDigits: digits, maximumFractionDigits: digits })} MB`;
+  const n = Math.max(0, Number(bytes) || 0);
+  if (n <= 0) return '0 MB';
+  return formatBytesLabel(n, lang) || '0 MB';
 }
 
 export default function SaveProgressModal({
