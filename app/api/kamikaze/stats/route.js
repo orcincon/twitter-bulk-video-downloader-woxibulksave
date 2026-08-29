@@ -243,7 +243,8 @@ export async function GET(request) {
         : supabase
             .from('users')
             .select('id', { count: 'exact', head: true })
-            .not('access_token', 'is', null),
+            .not('access_token', 'is', null)
+            .or('token_is_valid.is.null,token_is_valid.eq.true'),
       supabase.from('users').select('id, name, email, username'),
       fetchAllAnalysisLogs(supabase, { hiddenOnly }),
     ]);

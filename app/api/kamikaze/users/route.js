@@ -40,20 +40,21 @@ function emptyToNull(value, maxLen) {
 }
 
 async function fetchRegisteredUsers(supabase) {
-  const full = await supabase
-    .from('users')
-    .select('id, email, name, username, image, preferred_language, created_at, updated_at, access_token')
-    .order('created_at', { ascending: false });
-
-  if (!full.error) return full;
-
-  if (!isMissingColumnError(full.error)) return full;
-
-  console.warn('[kamikaze/users] users fallback:', full.error.message);
-  return supabase
-    .from('users')
-    .select('id, email, name, image, created_at, updated_at')
-    .order('created_at', { ascending: false });
+  const selects = [
+    'id, email, name, username, image, preferred_language, created_at, updated_at, access_token, token_is_valid, x_account_status',
+    'id, email, name, username, image, preferred_language, created_at, updated_at, access_token, token_is_valid',
+    'id, email, name, username, image, preferred_language, created_at, updated_at, access_token',
+    'id, email, name, image, created_at, updated_at',
+  ];
+  let last = null;
+  for (const select of selects) {
+    const res = await supabase.from('users').select(select).order('created_at', { ascending: false });
+    if (!res.error) return res;
+    last = res;
+    if (!isMissingColumnError(res.error)) return res;
+    console.warn('[kamikaze/users] users fallback:', res.error.message);
+  }
+  return last;
 }
 
 async function fetchGuestAnalysisRows(supabase) {
@@ -127,9 +128,11 @@ export async function GET() {
     guests.push(...byIp.values());
     guests.sort((a, b) => (b.last_seen || '').localeCompare(a.last_seen || ''));
 
-    const users = (usersRes.data ?? []).map(({ access_token, ...rest }) => ({
+    const users = (usersRes.data ?? []).map(({ access_token, token_is_valid, ...rest }) => ({
       ...rest,
       has_oauth_token: Boolean(access_token?.trim()),
+      token_is_valid: token_is_valid !== false,
+      x_account_status: rest.x_account_status || null,
     }));
 
     return NextResponse.json({ users, guests });

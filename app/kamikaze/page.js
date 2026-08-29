@@ -1096,14 +1096,27 @@ export default function KamikazePage() {
         setActionError('X kullanıcı adları alınamadı.');
         return;
       }
-      if (data.saved > 0) {
-        setUsernameSyncMessage(`${data.saved} kullanıcının X kullanıcı adı güncellendi.`);
-      } else if (data.missing === 0) {
-        setUsernameSyncMessage('Tüm kullanıcıların X kullanıcı adı zaten kayıtlı.');
+      const parts = [];
+      if (data.saved > 0) parts.push(`${data.saved} kullanıcı adı güncellendi`);
+      if (data.deleted > 0) parts.push(`${data.deleted} hesap silinmiş`);
+      if (data.suspended > 0) parts.push(`${data.suspended} hesap askıda`);
+      if (parts.length > 0) {
+        setUsernameSyncMessage(`${parts.join('. ')}.`);
+      } else if ((data.checked ?? 0) > 0 && (data.deleted ?? 0) === 0 && (data.suspended ?? 0) === 0) {
+        setUsernameSyncMessage('Kontrol edilen hesaplar aktif.');
       } else {
-        setUsernameSyncMessage('Eksik kullanıcı adı bulunamadı veya X API yanıt vermedi.');
+        setUsernameSyncMessage('Hesaplar kontrol edilemedi veya X API yanıt vermedi.');
       }
       await loadUsers();
+      if (Array.isArray(data.gone) && data.gone.length > 0) {
+        const byId = new Map(data.gone.map((row) => [String(row.id), row.status]));
+        setUsers((prev) =>
+          prev.map((user) => {
+            const status = byId.get(String(user.id));
+            return status ? { ...user, x_account_status: status } : user;
+          })
+        );
+      }
     } catch {
       setActionError('Bağlantı hatası.');
     } finally {
@@ -1534,10 +1547,21 @@ export default function KamikazePage() {
                         />
                       </th>
                       <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium">Önizleme</th>
-                      <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium w-28">Durum</th>
+                      <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium whitespace-nowrap" title="Kayıtlı videoların tahmini indirme boyutu">
+                        Boyut
+                      </th>
+                      <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium w-14">İndir</th>
                       <SortableTh
                         label="X"
                         field="user"
+                        sort={logsSort}
+                        onSort={handleLogsSort}
+                        className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3"
+                      />
+                      <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium w-28">Durum</th>
+                      <SortableTh
+                        label="Video linki"
+                        field="url"
                         sort={logsSort}
                         onSort={handleLogsSort}
                         className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3"
@@ -1550,14 +1574,6 @@ export default function KamikazePage() {
                         className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3"
                       />
                       <SortableTh
-                        label="Video linki"
-                        field="url"
-                        sort={logsSort}
-                        onSort={handleLogsSort}
-                        className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3"
-                      />
-                      <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium w-14">İndir</th>
-                      <SortableTh
                         label="Video"
                         field="video_count"
                         sort={logsSort}
@@ -1565,9 +1581,6 @@ export default function KamikazePage() {
                         className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3"
                         title="Bu linkten bulunan video adedi"
                       />
-                      <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium whitespace-nowrap" title="Kayıtlı videoların tahmini indirme boyutu">
-                        Boyut
-                      </th>
                       <th className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 font-medium w-12">Sil</th>
                     </tr>
                   </thead>
@@ -1613,44 +1626,15 @@ export default function KamikazePage() {
                               <span className="w-12 h-12 sm:w-14 sm:h-14 lg:w-16 lg:h-16 rounded-lg bg-gray-200 flex items-center justify-center text-gray-400 text-xs shrink-0">—</span>
                             )}
                           </td>
-                          <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 align-middle">
-                            {renderLiveStatusBadge(row)}
-                          </td>
-                          <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 text-xs truncate max-w-[90px] sm:max-w-[160px] align-middle">
-                            {row.user_username ? (
-                              <a
-                                href={`https://x.com/${encodeURIComponent(row.user_username)}`}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="text-[#1d9bf0] hover:underline"
-                                title={row.user_name}
-                              >
-                                {row.user_name}
-                              </a>
-                            ) : (
-                              <span title={row.user_name}>{row.user_name}</span>
-                            )}
-                          </td>
-                          <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 whitespace-nowrap align-middle">{formatDate(row.created_at)}</td>
-                          <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 max-w-[140px] sm:max-w-none align-middle">
-                            {row.url ? (
-                              <a
-                                href={row.url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="text-[#1d9bf0] hover:text-[#1d9bf0] font-mono text-xs sm:text-sm block truncate sm:truncate-none sm:break-all sm:whitespace-normal"
-                                title={row.url}
-                              >
-                                <span className="sm:hidden">
-                                  {row.url.replace(/^https?:\/\//, '').length > 40
-                                    ? `${row.url.replace(/^https?:\/\//, '').slice(0, 37)}…`
-                                    : row.url.replace(/^https?:\/\//, '')}
-                                </span>
-                                <span className="hidden sm:inline">{row.url}</span>
-                              </a>
-                            ) : (
-                              <span className="text-gray-400">—</span>
-                            )}
+                          <td
+                            className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 whitespace-nowrap tabular-nums align-middle"
+                            title={
+                              Array.isArray(row.video_urls) && row.video_urls.length > 0
+                                ? 'Kayıtlı videoların tahmini indirme boyutu'
+                                : 'Bu kayıtta video URL’si yok; boyut ölçülemez'
+                            }
+                          >
+                            {formatRowSizeLabel(row, videoBytesByUrl)}
                           </td>
                           <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 align-middle">
                             <button
@@ -1672,17 +1656,46 @@ export default function KamikazePage() {
                               )}
                             </button>
                           </td>
-                          <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 align-middle">{row.video_count ?? 0}</td>
-                          <td
-                            className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 whitespace-nowrap tabular-nums align-middle"
-                            title={
-                              Array.isArray(row.video_urls) && row.video_urls.length > 0
-                                ? 'Kayıtlı videoların tahmini indirme boyutu'
-                                : 'Bu kayıtta video URL’si yok; boyut ölçülemez'
-                            }
-                          >
-                            {formatRowSizeLabel(row, videoBytesByUrl)}
+                          <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 text-xs truncate max-w-[90px] sm:max-w-[160px] align-middle">
+                            {row.user_username ? (
+                              <a
+                                href={`https://x.com/${encodeURIComponent(row.user_username)}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-[#1d9bf0] hover:underline"
+                                title={row.user_name}
+                              >
+                                {row.user_name}
+                              </a>
+                            ) : (
+                              <span title={row.user_name}>{row.user_name}</span>
+                            )}
                           </td>
+                          <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 align-middle">
+                            {renderLiveStatusBadge(row)}
+                          </td>
+                          <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 max-w-[140px] sm:max-w-none align-middle">
+                            {row.url ? (
+                              <a
+                                href={row.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-[#1d9bf0] hover:text-[#1d9bf0] font-mono text-xs sm:text-sm block truncate sm:truncate-none sm:break-all sm:whitespace-normal"
+                                title={row.url}
+                              >
+                                <span className="sm:hidden">
+                                  {row.url.replace(/^https?:\/\//, '').length > 40
+                                    ? `${row.url.replace(/^https?:\/\//, '').slice(0, 37)}…`
+                                    : row.url.replace(/^https?:\/\//, '')}
+                                </span>
+                                <span className="hidden sm:inline">{row.url}</span>
+                              </a>
+                            ) : (
+                              <span className="text-gray-400">—</span>
+                            )}
+                          </td>
+                          <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 whitespace-nowrap align-middle">{formatDate(row.created_at)}</td>
+                          <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 align-middle">{row.video_count ?? 0}</td>
                           <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 align-middle">
                             <button
                               type="button"
@@ -1727,8 +1740,9 @@ export default function KamikazePage() {
                     onClick={handleSyncUsernames}
                     disabled={syncingUsernames || loadingUsers}
                     className="px-3 py-1.5 text-sm font-medium rounded-lg border border-[#1d9bf0]/40 text-[#1d9bf0] hover:bg-[#1d9bf0]/5 disabled:opacity-50"
+                    title="Eksik X adlarını doldurur; silinmiş veya askıdaki hesapları işaretler"
                   >
-                    {syncingUsernames ? 'X adları çekiliyor...' : 'X kullanıcı adlarını çek'}
+                    {syncingUsernames ? 'Hesaplar kontrol ediliyor...' : 'X kullanıcı adlarını çek'}
                   </button>
                   {users.length > 0 && !loadingUsers && (
                     <button
@@ -1844,23 +1858,47 @@ export default function KamikazePage() {
                               )}
                             </td>
                             <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 align-top whitespace-normal break-words">
-                              {u.username ? (
-                                <a
-                                  href={`https://x.com/${encodeURIComponent(u.username)}`}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="text-[#1d9bf0] hover:underline break-all"
-                                >
-                                  @{u.username}
-                                </a>
-                              ) : (
-                                '—'
-                              )}
+                              <div className="flex flex-col gap-1">
+                                {u.username ? (
+                                  <a
+                                    href={`https://x.com/${encodeURIComponent(u.username)}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className={`hover:underline break-all ${
+                                      u.x_account_status === 'deleted' || u.x_account_status === 'suspended'
+                                        ? 'text-gray-400 line-through'
+                                        : 'text-[#1d9bf0]'
+                                    }`}
+                                  >
+                                    @{u.username}
+                                  </a>
+                                ) : (
+                                  <span>—</span>
+                                )}
+                                {u.x_account_status === 'deleted' && (
+                                  <span className="inline-flex w-fit px-1.5 py-0.5 rounded text-[11px] font-medium bg-red-50 text-red-700">
+                                    Hesap silinmiş
+                                  </span>
+                                )}
+                                {u.x_account_status === 'suspended' && (
+                                  <span className="inline-flex w-fit px-1.5 py-0.5 rounded text-[11px] font-medium bg-red-50 text-red-700">
+                                    Hesap askıda
+                                  </span>
+                                )}
+                              </div>
                             </td>
                             <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 align-top whitespace-normal break-all">{u.email ?? '—'}</td>
                             <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 align-top whitespace-normal break-words">{u.name ?? '—'}</td>
                             <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 align-top">{u.preferred_language ?? '—'}</td>
-                            <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 align-top">{u.has_oauth_token ? 'Var' : 'Yok'}</td>
+                            <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 align-top">
+                              {u.x_account_status === 'deleted' || u.x_account_status === 'suspended' ? (
+                                <span className="text-red-700">Havuz dışı</span>
+                              ) : u.has_oauth_token ? (
+                                'Var'
+                              ) : (
+                                'Yok'
+                              )}
+                            </td>
                             <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 whitespace-nowrap align-top">{formatDate(u.created_at)}</td>
                             <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 text-gray-700 whitespace-nowrap align-top">{formatDate(u.updated_at)}</td>
                             <td className="px-3 sm:px-4 lg:px-6 py-2 sm:py-3 align-top">

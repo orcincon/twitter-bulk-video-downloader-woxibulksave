@@ -142,13 +142,23 @@ async function getTokenPool() {
   const items = [];
   const supabase = createSupabaseClient();
   if (supabase) {
-    const { data: users } = await supabase
+    let usersRes = await supabase
       .from('users')
-      .select('id, access_token')
+      .select('id, access_token, token_is_valid, x_account_status')
       .not('access_token', 'is', null)
       .or('token_is_valid.is.null,token_is_valid.eq.true');
-    if (users?.length) {
-      users.forEach((u) => {
+    if (usersRes.error) {
+      usersRes = await supabase
+        .from('users')
+        .select('id, access_token, token_is_valid')
+        .not('access_token', 'is', null)
+        .or('token_is_valid.is.null,token_is_valid.eq.true');
+    }
+    if (usersRes.data?.length) {
+      usersRes.data.forEach((u) => {
+        const status = String(u.x_account_status || '');
+        if (status === 'deleted' || status === 'suspended') return;
+        if (u.token_is_valid === false) return;
         const t = decryptToken(u.access_token)?.trim();
         if (t) items.push({ type: 'bearer', token: t, userId: u.id });
       });
