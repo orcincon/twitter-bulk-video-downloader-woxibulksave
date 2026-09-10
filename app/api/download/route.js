@@ -7,7 +7,7 @@ import { collapseDistinctVideos } from '@/lib/tweet-media.js';
 import { extractTweetId as extractTweetIdFromUrl } from '@/lib/tweet-url.js';
 
 const TWITTER_URL_REGEX = /https?:\/\/(www\.|mobile\.)?(x\.com|twitter\.com)\/[^/]+\/status\/(\d+)/;
-const REQUEST_DELAY_MS = 1500;
+const ANALYZE_CONCURRENCY = 3;
 
 function extractTweetId(url) {
   return extractTweetIdFromUrl(url);
@@ -27,8 +27,19 @@ function normalizeUrl(url) {
   return sanitizeTweetUrl(url);
 }
 
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+async function mapWithConcurrency(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      out[index] = await fn(items[index], index);
+    }
+  }
+  const workers = Math.max(1, Math.min(limit, items.length));
+  await Promise.all(Array.from({ length: items.length ? workers : 0 }, () => worker()));
+  return out;
 }
 
 function parseQualityScore(q) {
@@ -278,66 +289,125 @@ async function fetchViaSyndication(tweetId, authToken, accessToken) {
   return parseSyndicationVideos(data);
 }
 
+function isAuthFailure(result) {
+  return result?.httpStatus === 401 || result?.httpStatus === 403;
+}
+
+function successPayload(tweetUrl, videos, thumbnail, metadata) {
+  return {
+    tweetUrl: canonicalizeResultTweetUrl(tweetUrl, metadata),
+    status: 'success',
+    videos,
+    thumbnail: thumbnail || null,
+    metadata: metadata || null,
+    error: null,
+  };
+}
+
+function orderTokenAttempts(pool, sessionAccessToken) {
+  const attempts = [];
+  const seen = new Set();
+  const push = (cred) => {
+    if (!cred) return;
+    const key = `${cred.type}:${cred.userId || cred.authTokenId || cred.token || ''}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    attempts.push(cred);
+  };
+  if (sessionAccessToken) {
+    push({ type: 'bearer', token: sessionAccessToken, userId: null });
+  }
+  const fresh = [];
+  const stale = [];
+  for (const item of pool) {
+    const expired = item.expiresAt && Number.isFinite(Date.parse(item.expiresAt)) && Date.now() >= Date.parse(item.expiresAt);
+    const looksLive = item.type === 'cookie' || (item.token && item.tokenIsValid !== false && !expired);
+    if (looksLive) fresh.push(item);
+    else stale.push(item);
+  }
+  if (fresh.length > 0) {
+    const start = tokenPoolIndex % fresh.length;
+    for (let i = 0; i < fresh.length; i++) push(fresh[(start + i) % fresh.length]);
+  }
+  stale.forEach(push);
+  return attempts;
+}
+
 async function fetchVideoForUrl(tweetUrl, sessionAccessToken) {
   const tweetId = extractTweetId(tweetUrl);
   if (!tweetId) {
     return { tweetUrl, status: 'error', videos: [], error: 'Invalid tweet URL' };
   }
 
+  let fixResult;
+  const fixPromise = fetchViaFixTweet(tweetId, tweetUrl)
+    .then((r) => {
+      fixResult = r;
+      return r;
+    })
+    .catch(() => {
+      fixResult = { videos: [], thumbnail: null, metadata: null, noMedia: false };
+      return fixResult;
+    });
+
   const pool = await getTokenPool();
-  const attempts = pool.length > 0 ? pool : [{ type: 'bearer', token: sessionAccessToken, userId: null }];
+  if (fixResult?.videos?.length > 0) {
+    return successPayload(tweetUrl, fixResult.videos, fixResult.thumbnail, fixResult.metadata);
+  }
+
+  const attempts =
+    pool.length > 0 || sessionAccessToken ? orderTokenAttempts(pool, sessionAccessToken) : [];
 
   for (let i = 0; i < attempts.length; i++) {
-    const cred = attempts[(tokenPoolIndex + i) % attempts.length];
-    const authToken = cred?.type === 'cookie' ? cred.token : null;
-    const accessToken = cred?.type === 'bearer' ? cred.token : sessionAccessToken;
+    if (fixResult?.videos?.length > 0) {
+      return successPayload(tweetUrl, fixResult.videos, fixResult.thumbnail, fixResult.metadata);
+    }
+    const cred = attempts[i];
+    let authToken = cred?.type === 'cookie' ? cred.token : null;
+    let accessToken = cred?.type === 'bearer' ? cred.token : null;
+    if (cred?.type === 'bearer' && !accessToken && cred.userId) {
+      const warmed = await refreshPoolBearer(cred);
+      if (warmed?.token) accessToken = warmed.token;
+    }
     if (!authToken && !accessToken) continue;
     try {
       const result = await fetchViaSyndication(tweetId, authToken, accessToken);
       if (result && result.videos?.length > 0) {
-        tokenPoolIndex += i + 1;
-        const fixRaw = await fetchFixTweetRaw(tweetUrl);
-        const meta = fixRaw ? parseFixTweetMetadata(fixRaw) : null;
-        const fixThumb = fixRaw ? parseFixTweetVideos(fixRaw).thumbnail : null;
-        const thumbnail = result.thumbnail || fixThumb || null;
-        const canonicalUrl = canonicalizeResultTweetUrl(tweetUrl, meta);
-        return { tweetUrl: canonicalUrl, status: 'success', videos: result.videos, thumbnail, metadata: meta || null, error: null };
+        tokenPoolIndex += 1;
+        return successPayload(
+          tweetUrl,
+          result.videos,
+          result.thumbnail || fixResult?.thumbnail,
+          fixResult?.metadata || null
+        );
       }
-      if (result === null) continue;
-      if (result?.httpStatus === 401 || result?.httpStatus === 403) {
+      if (isAuthFailure(result)) {
         const refreshed = await refreshPoolBearer(cred);
         if (refreshed?.token) {
           const retry = await fetchViaSyndication(tweetId, null, refreshed.token);
           if (retry && retry.videos?.length > 0) {
-            tokenPoolIndex += i + 1;
-            const fixRaw = await fetchFixTweetRaw(tweetUrl);
-            const meta = fixRaw ? parseFixTweetMetadata(fixRaw) : null;
-            const fixThumb = fixRaw ? parseFixTweetVideos(fixRaw).thumbnail : null;
-            const thumbnail = retry.thumbnail || fixThumb || null;
-            const canonicalUrl = canonicalizeResultTweetUrl(tweetUrl, meta);
-            return { tweetUrl: canonicalUrl, status: 'success', videos: retry.videos, thumbnail, metadata: meta || null, error: null };
+            tokenPoolIndex += 1;
+            return successPayload(
+              tweetUrl,
+              retry.videos,
+              retry.thumbnail || fixResult?.thumbnail,
+              fixResult?.metadata || null
+            );
           }
-          if (retry === null || (retry?.httpStatus !== 401 && retry?.httpStatus !== 403)) continue;
+          if (!isAuthFailure(retry)) break;
         }
         await markTokenInvalid(cred);
         continue;
       }
+      break;
     } catch (_) {
-      continue;
+      break;
     }
   }
 
-  const fixTweetResult = await fetchViaFixTweet(tweetId, tweetUrl);
+  const fixTweetResult = fixResult === undefined ? await fixPromise : fixResult;
   if (fixTweetResult?.videos?.length > 0) {
-    const canonicalUrl = canonicalizeResultTweetUrl(tweetUrl, fixTweetResult.metadata);
-    return {
-      tweetUrl: canonicalUrl,
-      status: 'success',
-      videos: fixTweetResult.videos,
-      thumbnail: fixTweetResult.thumbnail || null,
-      metadata: fixTweetResult.metadata || null,
-      error: null,
-    };
+    return successPayload(tweetUrl, fixTweetResult.videos, fixTweetResult.thumbnail, fixTweetResult.metadata);
   }
 
   const noMediaMsg = 'Bu gönderi medya içermiyor';
@@ -388,15 +458,13 @@ export async function POST(request) {
     if (session?.user?.id) await ensureUserInSupabase(session);
     const accessToken = session?.access_token || null;
 
-    const results = [];
-    for (let i = 0; i < unique.length; i++) {
-      if (i > 0) await delay(REQUEST_DELAY_MS);
+    const results = await mapWithConcurrency(unique, ANALYZE_CONCURRENCY, async (url) => {
       try {
-        results.push(await fetchVideoForUrl(unique[i], accessToken));
+        return await fetchVideoForUrl(url, accessToken);
       } catch (err) {
-        results.push({ tweetUrl: unique[i], status: 'error', videos: [], error: err?.message || 'Analiz hatası' });
+        return { tweetUrl: url, status: 'error', videos: [], error: err?.message || 'Analiz hatası' };
       }
-    }
+    });
 
     return NextResponse.json(
       { success: true, results },

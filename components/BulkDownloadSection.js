@@ -210,6 +210,7 @@ export default function BulkDownloadSection({
   const downloadedPostKeysRef = useRef(new Set());
   const bulkThumbnailsRef = useRef({});
   const probedVideoUrlsRef = useRef(new Set());
+  const fetchedMetaUrlsRef = useRef(new Set());
   bulkThumbnailsRef.current = bulkThumbnails;
 
   const pasteLinksModalTextDefault = lang === 'tr' ? 'Lütfen önce Twitter/X gönderi linklerini yapıştırın.' : lang === 'de' ? 'Bitte fügen Sie zuerst Twitter/X-Beitragslinks ein.' : lang === 'es' ? 'Por favor, pegue primero los enlaces de publicaciones de Twitter/X.' : 'Please paste Twitter/X post links first.';
@@ -422,8 +423,6 @@ export default function BulkDownloadSection({
     setIsProcessing(true);
     setError(null);
 
-    await new Promise((r) => setTimeout(r, 200));
-
     try {
       const res = await fetch('/api/download', {
         method: 'POST',
@@ -532,7 +531,7 @@ export default function BulkDownloadSection({
 
     const id = setTimeout(() => {
       handleDownloadRef.current({ showSignInToast: false });
-    }, 800);
+    }, 350);
     return () => clearTimeout(id);
   }, [links.join('|'), isLoggedIn]);
 
@@ -572,6 +571,45 @@ export default function BulkDownloadSection({
     return () => {
       cancelled = true;
       for (const url of inflight) probedVideoUrlsRef.current.delete(url);
+    };
+  }, [results]);
+
+  useEffect(() => {
+    const pending = results.filter(
+      (r) =>
+        r?.status === 'success' &&
+        r?.tweetUrl &&
+        !r.metadata &&
+        !fetchedMetaUrlsRef.current.has(r.tweetUrl)
+    );
+    if (pending.length === 0) return;
+    pending.forEach((r) => fetchedMetaUrlsRef.current.add(r.tweetUrl));
+
+    let cancelled = false;
+    (async () => {
+      const updates = new Map();
+      await Promise.all(
+        pending.map(async (row) => {
+          try {
+            const res = await fetch(`/api/tweet-metadata?url=${encodeURIComponent(row.tweetUrl)}`, {
+              credentials: 'include',
+            });
+            const data = await res.json().catch(() => ({}));
+            if (data?.metadata) updates.set(row.tweetUrl, data.metadata);
+          } catch (_) {}
+        })
+      );
+      if (cancelled || updates.size === 0) return;
+      setResults((prev) =>
+        prev.map((row) => {
+          const meta = updates.get(row.tweetUrl);
+          return meta ? { ...row, metadata: meta } : row;
+        })
+      );
+    })();
+
+    return () => {
+      cancelled = true;
     };
   }, [results]);
 
