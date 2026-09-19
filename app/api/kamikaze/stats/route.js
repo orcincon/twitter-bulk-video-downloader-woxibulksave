@@ -105,21 +105,21 @@ function expandRecentLogs(rawLogs, resolveUserLabel) {
   return recentLogs;
 }
 
-const DUPLICATE_ROW_WINDOW_MS = 30 * 1000;
-
 function collapseDuplicateRecentRows(rows) {
-  const seen = new Map();
-  const out = [];
+  const byKey = new Map();
   for (const row of rows) {
-    const tweetId = extractTweetId(row.url) || row.url || row.id;
-    const key = `${row.user_id || 'guest'}|${tweetId}`;
-    const t = Date.parse(row.created_at) || 0;
-    const prev = seen.get(key);
-    if (prev != null && Math.abs(prev - t) < DUPLICATE_ROW_WINDOW_MS) continue;
-    seen.set(key, t);
-    out.push(row);
+    const tweetId = extractTweetId(row.url);
+    const key = tweetId || String(row.url || '').split('?')[0] || row.id;
+    const prev = byKey.get(key);
+    if (!prev) {
+      byKey.set(key, row);
+      continue;
+    }
+    const prevT = Date.parse(prev.created_at) || 0;
+    const nextT = Date.parse(row.created_at) || 0;
+    if (nextT >= prevT) byKey.set(key, row);
   }
-  return out;
+  return [...byKey.values()];
 }
 
 async function resolveLegacyAnonymousUrls(recentLogs) {
