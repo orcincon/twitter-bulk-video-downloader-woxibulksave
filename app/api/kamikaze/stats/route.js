@@ -96,6 +96,7 @@ function expandRecentLogs(rawLogs, resolveUserLabel) {
         user_username: userUsername,
         created_at: log.created_at,
         url: resolveTweetDisplayUrl(url, { tweetUrl: result?.tweetUrl, metadata: result?.metadata }),
+        tweet_id: extractTweetId(url) || extractTweetId(result?.tweetUrl) || null,
         thumbnail: thumb,
         video_count: videoCount,
         video_urls: Array.isArray(result?.videos) ? getPlayableVideoUrls(result.videos) : [],

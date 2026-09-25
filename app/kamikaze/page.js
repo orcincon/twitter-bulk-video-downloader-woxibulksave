@@ -704,15 +704,24 @@ export default function KamikazePage() {
     });
   };
 
-  const deleteLogs = async (logIds, mode = 'hard') => {
-    if (!logIds.length) return;
+  const deleteLogs = async (logIds, mode = 'hard', extra = {}) => {
+    const tweetIds = Array.isArray(extra.tweetIds) ? extra.tweetIds.filter(Boolean) : [];
+    if (!logIds.length && !tweetIds.length && !extra.all) return;
     setDeleting(true);
     setActionError('');
     try {
       const res = await fetch('/api/kamikaze/logs/delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ log_ids: logIds, mode }),
+        body: JSON.stringify({
+          log_ids: logIds,
+          tweet_ids: tweetIds,
+          mode,
+          all: Boolean(extra.all),
+          hidden: extra.hidden === true || activeTab === 'hidden',
+          username: extra.username || '',
+          usernameMode: extra.usernameMode || 'include',
+        }),
         credentials: 'include',
       });
       const data = await res.json().catch(() => ({}));
@@ -723,7 +732,17 @@ export default function KamikazePage() {
       if (res.ok && data.ok) {
         setSelectedRowIds(new Set());
         setSelectedHiddenRowIds(new Set());
-        if (activeTab === 'hidden') {
+        const goHidden = extra.hidden === true || activeTab === 'hidden';
+        if (extra.all) {
+          if (goHidden) {
+            if (hiddenPage !== 1) setHiddenPage(1);
+            else await loadHiddenLogs(1);
+          } else if (logsPage !== 1) {
+            setLogsPage(1);
+          } else {
+            await loadStats(1);
+          }
+        } else if (goHidden) {
           const nextPage =
             hiddenLogs.length <= 1 && hiddenPage > 1 ? hiddenPage - 1 : hiddenPage;
           if (nextPage !== hiddenPage) setHiddenPage(nextPage);
@@ -747,11 +766,12 @@ export default function KamikazePage() {
   };
 
   const handleDeleteRow = (row) => {
+    const tweetIds = row.tweet_id ? [row.tweet_id] : [];
     openConfirm({
       message: 'Bu kayıt kamikaze listesinden kaldırılacak.',
-      detail: 'Soft sil kullanıcının arşivini korur.\nKalıcı sil kaydı arşivden de siler.',
-      onSoftConfirm: () => deleteLogs([row.log_id], 'soft'),
-      onHardConfirm: () => deleteLogs([row.log_id], 'hard'),
+      detail: 'Soft sil kullanıcının arşivini korur.\nKalıcı sil kaydı arşivden de siler.\nAynı linkin diğer kopyaları da listeden düşer.',
+      onSoftConfirm: () => deleteLogs(row.log_id ? [row.log_id] : [], 'soft', { tweetIds }),
+      onHardConfirm: () => deleteLogs(row.log_id ? [row.log_id] : [], 'hard', { tweetIds }),
     });
   };
 
@@ -859,13 +879,39 @@ export default function KamikazePage() {
   };
 
   const handleBulkDelete = () => {
-    const logIds = [...new Set(stats.recentLogs.filter((r) => selectedRowIds.has(r.id)).map((r) => r.log_id))];
-    if (!logIds.length) return;
+    const rows = displayedRecentLogs.filter((r) => selectedRowIds.has(r.id));
+    const tweetIds = [...new Set(rows.map((r) => r.tweet_id).filter(Boolean))];
+    const logIds = [...new Set(rows.map((r) => r.log_id).filter(Boolean))];
+    if (!tweetIds.length && !logIds.length) return;
     openConfirm({
-      message: `${logIds.length} analiz kamikaze listesinden kaldırılacak.`,
+      message: `${rows.length} analiz kamikaze listesinden kaldırılacak.`,
+      detail: 'Soft sil kullanıcı arşivlerini korur.\nKalıcı sil kayıtları arşivden de siler.\nAynı linkin diğer kopyaları da listeden düşer.',
+      onSoftConfirm: () => deleteLogs(logIds, 'soft', { tweetIds }),
+      onHardConfirm: () => deleteLogs(logIds, 'hard', { tweetIds }),
+    });
+  };
+
+  const handleDeleteAllVisible = () => {
+    const total = logsPagination.totalRecentRows || displayedRecentLogs.length;
+    if (!total) return;
+    const username = logsUsernameFilter.trim().replace(/^@+/, '');
+    openConfirm({
+      message: `${total} benzersiz link (tüm sayfalar) kamikaze listesinden kaldırılacak.`,
       detail: 'Soft sil kullanıcı arşivlerini korur.\nKalıcı sil kayıtları arşivden de siler.',
-      onSoftConfirm: () => deleteLogs(logIds, 'soft'),
-      onHardConfirm: () => deleteLogs(logIds, 'hard'),
+      onSoftConfirm: () =>
+        deleteLogs([], 'soft', {
+          all: true,
+          hidden: false,
+          username,
+          usernameMode: logsUsernameFilterMode,
+        }),
+      onHardConfirm: () =>
+        deleteLogs([], 'hard', {
+          all: true,
+          hidden: false,
+          username,
+          usernameMode: logsUsernameFilterMode,
+        }),
     });
   };
 
@@ -956,14 +1002,13 @@ export default function KamikazePage() {
     });
   };
 
-  const selectedHiddenLogIds = () =>
-    [...new Set(hiddenLogs.filter((r) => selectedHiddenRowIds.has(r.id)).map((r) => r.log_id))];
+  const selectedHiddenRows = () => displayedHiddenLogs.filter((r) => selectedHiddenRowIds.has(r.id));
 
   const handleRestoreHiddenRow = (row) => {
     openConfirm({
       message: 'Bu kayıt istatistiklere geri alınacak.',
       confirmLabel: 'Geri al',
-      onConfirm: () => deleteLogs([row.log_id], 'restore'),
+      onConfirm: () => deleteLogs(row.log_id ? [row.log_id] : [], 'restore', { tweetIds: row.tweet_id ? [row.tweet_id] : [], hidden: true }),
     });
   };
 
@@ -971,27 +1016,48 @@ export default function KamikazePage() {
     openConfirm({
       message: 'Bu kayıt kalıcı olarak silinecek. Kullanıcının arşivinden de gider.',
       confirmLabel: 'Kalıcı sil',
-      onConfirm: () => deleteLogs([row.log_id], 'hard'),
+      onConfirm: () => deleteLogs(row.log_id ? [row.log_id] : [], 'hard', { tweetIds: row.tweet_id ? [row.tweet_id] : [], hidden: true }),
     });
   };
 
   const handleBulkRestoreHidden = () => {
-    const logIds = selectedHiddenLogIds();
-    if (!logIds.length) return;
+    const rows = selectedHiddenRows();
+    const tweetIds = [...new Set(rows.map((r) => r.tweet_id).filter(Boolean))];
+    const logIds = [...new Set(rows.map((r) => r.log_id).filter(Boolean))];
+    if (!tweetIds.length && !logIds.length) return;
     openConfirm({
-      message: `${logIds.length} kayıt istatistiklere geri alınacak.`,
+      message: `${rows.length} kayıt istatistiklere geri alınacak.`,
       confirmLabel: 'Geri al',
-      onConfirm: () => deleteLogs(logIds, 'restore'),
+      onConfirm: () => deleteLogs(logIds, 'restore', { tweetIds, hidden: true }),
     });
   };
 
   const handleBulkHardDeleteHidden = () => {
-    const logIds = selectedHiddenLogIds();
-    if (!logIds.length) return;
+    const rows = selectedHiddenRows();
+    const tweetIds = [...new Set(rows.map((r) => r.tweet_id).filter(Boolean))];
+    const logIds = [...new Set(rows.map((r) => r.log_id).filter(Boolean))];
+    if (!tweetIds.length && !logIds.length) return;
     openConfirm({
-      message: `${logIds.length} kayıt kalıcı olarak silinecek. Kullanıcı arşivlerinden de gider.`,
+      message: `${rows.length} kayıt kalıcı olarak silinecek. Kullanıcı arşivlerinden de gider.`,
       confirmLabel: 'Kalıcı sil',
-      onConfirm: () => deleteLogs(logIds, 'hard'),
+      onConfirm: () => deleteLogs(logIds, 'hard', { tweetIds, hidden: true }),
+    });
+  };
+
+  const handleDeleteAllHidden = () => {
+    const total = hiddenPagination.totalRecentRows || displayedHiddenLogs.length;
+    if (!total) return;
+    const username = hiddenUsernameFilter.trim().replace(/^@+/, '');
+    openConfirm({
+      message: `${total} kayıt (tüm sayfalar) kalıcı olarak silinecek.`,
+      confirmLabel: 'Tümünü sil',
+      onConfirm: () =>
+        deleteLogs([], 'hard', {
+          all: true,
+          hidden: true,
+          username,
+          usernameMode: hiddenUsernameFilterMode,
+        }),
     });
   };
 
@@ -1546,6 +1612,16 @@ export default function KamikazePage() {
                       className="px-3 py-1.5 text-sm font-medium rounded-lg border border-gray-200 text-gray-700 hover:bg-gray-50"
                     >
                       {allFilteredLogsSelected ? 'Seçimi kaldır' : 'Tümünü seç'}
+                    </button>
+                  )}
+                  {filteredRecentLogs.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={handleDeleteAllVisible}
+                      disabled={deleting}
+                      className="px-3 py-1.5 text-sm font-medium rounded-lg border border-red-200 text-red-700 hover:bg-red-50 disabled:opacity-50"
+                    >
+                      {deleting ? 'Siliniyor…' : 'Tümünü sil'}
                     </button>
                   )}
                   <button
@@ -2390,6 +2466,16 @@ export default function KamikazePage() {
                     className="px-3 py-1.5 text-sm font-medium rounded-lg border border-gray-200 text-gray-700 hover:bg-gray-50"
                   >
                     {allHiddenLogsSelected ? 'Seçimi kaldır' : 'Tümünü seç'}
+                  </button>
+                )}
+                {filteredHiddenLogs.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleDeleteAllHidden}
+                    disabled={deleting}
+                    className="px-3 py-1.5 text-sm font-medium rounded-lg border border-red-200 text-red-700 hover:bg-red-50 disabled:opacity-50"
+                  >
+                    {deleting ? 'Siliniyor…' : 'Tümünü sil'}
                   </button>
                 )}
                 <button
